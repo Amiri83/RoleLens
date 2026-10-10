@@ -1,0 +1,16 @@
+{# Validation results; editor.js renders the same markup after each change. #}
+{% set errors = issues | selectattr('level', 'equalto', 'error') | list %}
+{% set warnings = issues | selectattr('level', 'equalto', 'warning') | list %}
+<h2>Validation
+  {% if errors %}<span class="badge err">{{ errors | length }} error{{ '' if errors | length == 1 else 's' }}</span>
+  {% else %}<span class="badge ok">valid</span>{% endif %}
+  {% if warnings %}<span class="badge warn">{{ warnings | length }} warning{{ '' if warnings | length == 1 else 's' }}</span>{% endif %}
+</h2>
+<ul class="issue-list">
+  {% for i in issues %}
+    <li class="issue {{ i.level }}" data-where="{{ i.where }}"><span class="badge {{ 'err' if i.level == 'error' else 'warn' }}">{{ i.level }}</span>
+      <b>{{ i.where }}</b>{% if i.path %} <span class="mono">{{ i.path }}</span>{% endif %}: {{ i.message }}</li>
+  {% else %}
+    <li class="muted">No problems found (structure, Effect / Action / Resource, principals, conditions and known action names).</li>
+  {% endfor %}
+</ul>

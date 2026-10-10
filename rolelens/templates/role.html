@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% from "_macros.html" import graph_panel, graph_scripts with context %}
+{% block title %}{{ role.role_name }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('roles') }}" class="back-link">← Roles</a></p>
+<div class="row" style="justify-content: space-between">
+  <h1>{{ role.role_name }} <span class="muted mono small">{{ role.path }}</span></h1>
+  <form method="post" action="{{ url_for('role_clone', name=role.role_name) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" title="Copy into a local draft (never written to AWS)">Clone to draft</button>
+  </form>
+</div>
+<p class="muted">
+  {% if role.description %}{{ role.description }} · {% endif %}
+  last used: {% if role.last_used_at %}{{ role.last_used_at | localtime }}{% if role.last_used_region %} ({{ role.last_used_region }}){% endif %}{% else %}never / unknown{% endif %}
+  · max session {{ role.max_session_duration }}s
+  {% if role.permissions_boundary %}· permissions boundary <span class="mono">{{ role.permissions_boundary }}</span>{% endif %}
+</p>
+
+{{ graph_panel(layouts, 'graph-data') }}
+<script type="application/json" id="graph-data">{{ graph | tojson }}</script>
+
+<h2>Trust policy</h2>
+<details class="card"><summary>JSON</summary><pre class="json">{{ dumps(role.trust) }}</pre></details>
+
+<h2>Policies ({{ role.policies | length }})</h2>
+{% for p in role.policies %}
+<details class="card">
+  <summary><b>{{ p.name }}</b> <span class="badge">{{ {'inline': 'inline', 'managed': 'customer managed', 'aws': 'AWS managed'}[p.kind] }}</span>
+    {% if p.arn %}<span class="muted mono small">{{ p.arn }}</span>{% endif %}</summary>
+  {% if p.document is none %}<p class="badge warn">document not readable (see the collection warnings)</p>
+  {% else %}<pre class="json">{{ dumps(p.document) }}</pre>{% endif %}
+</details>
+{% else %}
+<p class="muted">No policies attached.</p>
+{% endfor %}
+{% endblock %}
+{% block scripts %}
+{{ graph_scripts() }}
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const data = JSON.parse(document.getElementById("graph-data").textContent);
+  const graph = window.RoleGraph.mount(document.getElementById("cy"));
+  graph.setData(data);
+});
+</script>
+{% endblock %}

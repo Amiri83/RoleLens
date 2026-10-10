@@ -1,0 +1,92 @@
+# RoleLens
+
+Local web app to explore, graph and safely redesign AWS IAM roles.
+
+RoleLens collects your IAM roles **read-only**, shows who can assume each role and what it can
+do as an interactive graph, and lets you clone a role into a local **draft**, edit its trust and
+permission policies with live IAM validation, diff it against the original and export policy
+JSON or Terraform. **RoleLens never writes to AWS**: every boto3 client refuses any operation that
+is not `List*` / `Get*`, and drafts only ever live in the local SQLite database.
+
+Same stack and conventions as [IPLens](https://github.com/Amiri83/IPLens): Flask + SQLite, one
+data directory, Fernet-encrypted credentials, background jobs with a progress modal, a
+redacting log file and Host / CSRF guards.
+
+## Features
+
+- **Accounts**: environment, named profile (incl. SSO), access key, or pasted temporary STS
+  credentials (three fields, an `export AWS_…` block or `aws sts get-session-token` JSON).
+  Secrets are Fernet-encrypted at rest or kept in memory only.
+- **Collect** (background job, cancellable): `iam:ListRoles`, `iam:GetRole` (trust policy,
+  last used), `iam:ListAttachedRolePolicies`, `iam:ListRolePolicies`, `iam:GetRolePolicy`,
+  `iam:GetPolicy` + `iam:GetPolicyVersion` (default version). Everything is snapshotted in
+  SQLite; a missing permission on one call becomes a warning.
+- **Roles**: searchable list with path, last used, number of policies and trusted principals.
+- **Role graph** (cytoscape.js, vendored; Grid layout by default, also dagre hierarchy,
+  breadth-first, concentric, circle): principals that can assume → role → policies → services →
+  actions → resources. Allow edges are green, Deny edges red with a bar end, statements with a
+  `Condition` are dashed, nodes reached by both are marked "mixed". Click a node for the
+  statements behind it.
+- **Draft editor**: clone a role, edit role settings, the trust policy and the inline / customer
+  managed policies in a JSON editor (line numbers, error line marker, indentation, format);
+  add or remove policies (AWS managed policies are read-only: detach only). Validation covers
+  JSON syntax (line / column), document structure, `Effect` / `Action` / `Resource` /
+  `Principal` rules for trust vs identity policies, `Sid`s, condition operators, IAM name and
+  size limits and **known action names** (a built-in catalog of common services; actions of
+  other services are reported as "not checked"). The graph and a section-by-section diff
+  against the original update live.
+- **Export**: policy JSON files (copy each, download one or a zip) and Terraform HCL
+  (`aws_iam_role`, `aws_iam_policy_document` data sources, `aws_iam_role_policy`,
+  `aws_iam_policy` + `aws_iam_role_policy_attachment`; AWS managed policies attached by ARN),
+  `terraform fmt` style, copy or download.
+
+Planned for phase 2: policy simulator, unused-permission findings, UI polish.
+
+## Install and run
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/rolelens            # http://127.0.0.1:8078
+```
+
+Options: `--port`, `--host` (default `127.0.0.1`, local only), `--home` (data directory,
+default `$ROLELENS_HOME` or `~/.rolelens`). Set `ROLELENS_SECRET_KEY` to supply the Fernet key
+instead of the generated `secret.key` file.
+
+### Minimal IAM permissions
+
+`iam:ListRoles`, `iam:GetRole`, `iam:ListAttachedRolePolicies`, `iam:ListRolePolicies`,
+`iam:GetRolePolicy`, `iam:GetPolicy`, `iam:GetPolicyVersion` (`sts:GetCallerIdentity` needs
+none).
+
+## Security
+
+- Read-only AWS: a botocore `before-call` hook on every client rejects any operation that is
+  not `List*` / `Get*` (and secret-returning calls such as `sts:GetSessionToken`).
+- Credentials are never rendered, never logged (the log file redacts key ids, secrets and
+  tokens) and never part of an error message.
+- Only `127.0.0.1` / `localhost` Host headers are served (DNS rebinding); every POST needs the
+  session's CSRF token; the session cookie is `SameSite=Strict`.
+- All front-end assets are vendored: the browser makes no external requests.
+
+## Development
+
+```sh
+.venv/bin/pytest
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
+```
+
+Tests use moto and placeholder data only (`123456789012`, `role-a`, `bucket-a`). Export
+snapshots live in `tests/snapshots/`; after an intended output change run
+`ROLELENS_UPDATE_SNAPSHOTS=1 .venv/bin/pytest tests/test_export.py` and review the diff.
+
+## Vendored front-end assets
+
+| asset | path | source | license |
+|---|---|---|---|
+| cytoscape.js 3.34.3 (`dist/cytoscape.min.js`, unmodified) | `rolelens/static/vendor/cytoscape.min.js` | npm package `cytoscape@3.34.3` (same file as IPLens) | MIT – `rolelens/static/vendor/cytoscape.LICENSE` |
+| dagre (`dagre.min.js`, unmodified) | `rolelens/static/vendor/dagre.min.js` | npm package `dagre` (same file as IPLens) | MIT – `rolelens/static/vendor/dagre.LICENSE` |
+
+The JSON editor (`rolelens/static/jsonedit.js`) is RoleLens' own, dependency-free code.

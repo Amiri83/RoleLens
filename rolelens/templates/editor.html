@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% from "_macros.html" import graph_panel, graph_scripts with context %}
+{% block title %}Draft {{ draft.model.role_name }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('drafts_list') }}" class="back-link">← Drafts</a></p>
+<div class="row" style="justify-content: space-between">
+  <h1>Draft #{{ draft.id }}: {{ draft.model.role_name }}
+    <span class="muted small">cloned from <a href="{{ url_for('role_page', name=draft.source_role) }}">{{ draft.source_role }}</a></span></h1>
+  <div class="row editor-actions">
+    <span class="muted small" id="save-state" aria-live="polite"></span>
+    <button type="submit" form="save-form" id="save-btn">Save draft</button>
+    <a class="btn secondary" href="{{ url_for('draft_export', draft_id=draft.id) }}">Export…</a>
+    <form class="inline" method="post" action="{{ url_for('draft_reset', draft_id=draft.id) }}"
+          onsubmit="return confirm('Discard every change and go back to the collected role?')">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="secondary">Reset</button>
+    </form>
+  </div>
+</div>
+<p class="note muted small">Local draft only — <b>never written to AWS</b>. Changes are validated and graphed as you type; Save keeps them.</p>
+
+<div class="editor-layout">
+  <section class="editor-col">
+    <fieldset class="card role-fields" id="role-fields">
+      <legend>Role</legend>
+      <div class="row">
+        <div><label for="f-role_name">Name</label><input id="f-role_name" data-field="role_name" size="28" maxlength="64"></div>
+        <div><label for="f-path">Path</label><input id="f-path" data-field="path" size="14" class="mono"></div>
+        <div><label for="f-max_session_duration">Max session (s)</label>
+          <input id="f-max_session_duration" data-field="max_session_duration" type="number" min="3600" max="43200" step="60" size="7"></div>
+      </div>
+      <label for="f-description">Description</label>
+      <input id="f-description" data-field="description" size="60" maxlength="1000">
+      <label for="f-permissions_boundary">Permissions boundary ARN <span class="muted">(optional)</span></label>
+      <input id="f-permissions_boundary" data-field="permissions_boundary" size="60" class="mono">
+    </fieldset>
+
+    <div class="card doc-card">
+      <div class="row doc-toolbar">
+        <label for="doc-select" class="inline-label">Document</label>
+        <select id="doc-select"></select>
+        <button type="button" class="secondary" id="doc-format" title="Pretty-print the JSON">Format</button>
+        <button type="button" class="secondary" id="doc-add">Add inline policy</button>
+        <button type="button" class="danger" id="doc-remove">Remove policy</button>
+      </div>
+      <div class="row doc-meta" id="doc-meta">
+        <label for="doc-name" class="inline-label">Policy name</label>
+        <input id="doc-name" size="32" maxlength="128">
+        <span class="muted small" id="doc-kind"></span>
+      </div>
+      <textarea id="doc-editor" class="mono" rows="24" spellcheck="false" aria-label="Policy JSON"></textarea>
+    </div>
+
+    <div class="card issues" id="issues">
+      {% set issues = preview.issues %}
+      {% include "_issues.html" %}
+    </div>
+
+    <form id="save-form" method="post" action="{{ url_for('draft_save', draft_id=draft.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <details class="raw-model">
+        <summary>Raw draft JSON (advanced; used without JavaScript)</summary>
+        <textarea name="model" id="raw-model" class="mono" rows="16" spellcheck="false">{{ raw_model }}</textarea>
+        <noscript><p><button type="submit">Save draft</button></p></noscript>
+      </details>
+    </form>
+  </section>
+
+  <section class="graph-col">
+    {{ graph_panel(layouts, 'draft-data') }}
+  </section>
+</div>
+
+<h2>Changes vs the collected role</h2>
+<div id="diff">
+  {% set diff = preview.diff %}
+  {% include "_diff.html" %}
+</div>
+
+<script type="application/json" id="draft-data">{{ {"model": draft.model, "original": draft.original, "graph": preview.graph} | tojson }}</script>
+<div id="editor-config" hidden
+     data-preview-url="{{ url_for('draft_preview', draft_id=draft.id) }}"
+     data-save-url="{{ url_for('draft_save', draft_id=draft.id) }}"
+     data-csrf="{{ csrf_token }}"></div>
+{% endblock %}
+{% block scripts %}
+{{ graph_scripts() }}
+<script src="{{ url_for('static', filename='jsonedit.js') }}" defer></script>
+<script src="{{ url_for('static', filename='editor.js') }}" defer></script>
+{% endblock %}

@@ -1,0 +1,44 @@
+{# Import "with context": needs active_account, active_label and csrf_token. #}
+{% macro no_data() -%}
+  {% if active_account %}
+  <form class="card no-data" method="post" action="{{ url_for('collect') }}" data-job="collect">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    No IAM data yet for <b>{{ active_label }}</b> —
+    <button type="submit">Collect</button>
+    <span class="muted">(read-only iam:List* / iam:Get* calls)</span>
+  </form>
+  {% else %}
+  <div class="card no-data">No AWS account yet — add one in <a href="{{ url_for('settings_page') }}">Settings</a>.</div>
+  {% endif %}
+{%- endmacro %}
+
+{# The role graph: toolbar, canvas and the click-for-detail side panel (graph.js). #}
+{% macro graph_panel(layouts, elements_id) -%}
+  <div class="row graph-toolbar">
+    <label for="layout" class="inline-label">Layout</label>
+    <select id="layout">
+      {% for key, label in layouts.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+    </select>
+    <button type="button" class="secondary" id="graph-fit">Fit</button>
+    <span class="legend">
+      <span><i class="sw allow"></i>Allow</span>
+      <span><i class="sw deny"></i>Deny</span>
+      <span><i class="sw cond"></i>with Condition</span>
+      <span><i class="sw mixed"></i>Allow + Deny</span>
+    </span>
+    <span class="muted small" id="graph-stats"></span>
+  </div>
+  <div class="graph-main">
+    <div id="cy" class="card" data-elements="{{ elements_id }}" role="img" aria-label="Role graph"></div>
+    <aside class="card node-detail" id="node-detail" aria-live="polite">
+      <h2>Detail</h2>
+      <p class="muted">Click a node to see the statements behind it.</p>
+    </aside>
+  </div>
+{%- endmacro %}
+
+{% macro graph_scripts() -%}
+  <script src="{{ url_for('static', filename='vendor/cytoscape.min.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='vendor/dagre.min.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='graph.js') }}" defer></script>
+{%- endmacro %}

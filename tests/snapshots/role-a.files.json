@@ -1,0 +1,76 @@
+{
+  "policies/inline-policy-inline-a.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "ReadBucket",
+        "Effect": "Allow",
+        "Action": [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ],
+        "Resource": [
+          "arn:aws:s3:::bucket-a",
+          "arn:aws:s3:::bucket-a/${aws:username}/*"
+        ]
+      },
+      {
+        "Effect": "Deny",
+        "NotAction": "s3:*",
+        "NotResource": "arn:aws:s3:::bucket-a/*"
+      }
+    ]
+  },
+  "policies/managed-policy-a.json": {
+    "Version": "2012-10-17",
+    "Statement": {
+      "Effect": "Allow",
+      "Action": "sqs:SendMessage",
+      "Resource": "*"
+    }
+  },
+  "role.json": {
+    "RoleName": "role-a",
+    "Path": "/team-a/",
+    "Description": "Example role for tests",
+    "MaxSessionDuration": 3600,
+    "PermissionsBoundary": "arn:aws:iam::123456789012:policy/boundary-a",
+    "InlinePolicies": [
+      "policy-inline-a"
+    ],
+    "ManagedPolicyArns": [
+      "arn:aws:iam::123456789012:policy/policy-a",
+      "arn:aws:iam::aws:policy/policy-b"
+    ]
+  },
+  "trust-policy.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "lambda.amazonaws.com"
+        },
+        "Action": "sts:AssumeRole"
+      },
+      {
+        "Sid": "CrossAccount",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": [
+            "arn:aws:iam::123456789012:root"
+          ]
+        },
+        "Action": [
+          "sts:AssumeRole",
+          "sts:TagSession"
+        ],
+        "Condition": {
+          "StringEquals": {
+            "sts:ExternalId": "example-external-id"
+          }
+        }
+      }
+    ]
+  }
+}

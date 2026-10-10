@@ -1,0 +1,15 @@
+{# Unified diff per section; editor.js renders the same markup after each change. #}
+{% if diff is none %}
+  <p class="muted">Fix the JSON syntax errors to see the diff.</p>
+{% elif not diff.changed %}
+  <p class="muted">No changes yet.</p>
+{% else %}
+  <p class="muted small">{{ diff.summary.changed }} changed · {{ diff.summary.added }} added · {{ diff.summary.removed }} removed</p>
+  {% for s in diff.sections if s.status != 'unchanged' %}
+  <details class="card diff-section" open>
+    <summary><b>{{ s.title }}</b> <span class="badge {{ {'added': 'ok', 'removed': 'err', 'changed': 'warn'}[s.status] }}">{{ s.status }}</span></summary>
+    <pre class="diff">{% for l in s.lines %}<span class="d-{{ l.cls }}">{{ l.text }}</span>
+{% endfor %}</pre>
+  </details>
+  {% endfor %}
+{% endif %}
