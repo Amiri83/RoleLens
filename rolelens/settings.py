@@ -1,4 +1,5 @@
-"""Global application settings (log directory, active account) and shared helpers.
+"""Global application settings (log directory, overlap threshold, active account) and
+shared helpers.
 
 AWS credentials are per account; see :mod:`rolelens.accounts`.
 """
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .db import ACTIVE_ACCOUNT_KEY, closing
+from .recommend import DEFAULT_THRESHOLD, parse_threshold
 
 # A practical list; the GUI also accepts any free-text region code. IAM is global: the
 # region only selects the STS endpoint.
@@ -48,6 +50,8 @@ MAX_DISPLAY_NAME = 64
 @dataclass
 class Settings:
     log_dir: str = ""
+    # Jaccard similarity from which two roles are reported as overlapping (Recommendations).
+    overlap_threshold: float = DEFAULT_THRESHOLD
 
 
 def mask_key_id(key_id: str) -> str:
@@ -76,9 +80,18 @@ class SettingsStore:
             )
 
     def load(self) -> Settings:
-        return Settings(log_dir=self._get("log_dir"))
+        return Settings(
+            log_dir=self._get("log_dir"),
+            overlap_threshold=parse_threshold(self._get("overlap_threshold")),
+        )
 
-    def save(self, *, log_dir: str = "") -> None:
+    def save(self, *, log_dir: str = "", overlap_threshold: str | float | None = None) -> None:
+        """Save the settings; an invalid ``overlap_threshold`` raises ValueError."""
+        if overlap_threshold not in (None, ""):
+            value = parse_threshold(overlap_threshold, default=-1.0)
+            if value < 0:
+                raise ValueError("the overlap threshold must be a number from 0.5 to 1")
+            self._set("overlap_threshold", str(value))
         self._set("log_dir", log_dir.strip())
 
     def active_account_id(self) -> int | None:

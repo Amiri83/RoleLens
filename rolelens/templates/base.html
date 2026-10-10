@@ -17,6 +17,7 @@
       <a href="{{ url_for(endpoint) }}"{% if active %} class="active" aria-current="page"{% endif %}>{{ label }}</a>
     {%- endmacro %}
     {{ nav_link('roles', 'Roles', ep.startswith('role')) }}
+    {{ nav_link('insights_page', 'Insights', ep.startswith('insights')) }}
     {{ nav_link('drafts_list', 'Drafts', ep.startswith('draft')) }}
     {{ nav_link('settings_page', 'Settings', ep.startswith('settings') or ep.startswith('account')) }}
     {{ nav_link('logs', 'Logs', ep == 'logs') }}
@@ -41,7 +42,7 @@
   <form class="account-switch" method="post" action="{{ url_for('account_activate') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     {# Role and draft pages belong to one account: after switching, land on Roles. #}
-    <input type="hidden" name="next" value="{{ url_for('roles') if ep.startswith('role_') or ep.startswith('draft_') else request.full_path.rstrip('?') }}">
+    <input type="hidden" name="next" value="{{ url_for('roles') if ep.startswith('role_') or ep.startswith('draft_') or ep == 'insights_compare' else request.full_path.rstrip('?') }}">
     <label for="account-select" class="sr-only">Active account</label>
     <select id="account-select" name="account_id" onchange="this.form.submit()">
       {% for c in account_choices %}

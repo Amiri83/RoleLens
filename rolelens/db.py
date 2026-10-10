@@ -85,6 +85,87 @@ CREATE TABLE IF NOT EXISTS managed_policies (
     PRIMARY KEY (snapshot_id, arn)
 );
 
+-- Insights of a snapshot (insights.py), computed from the collected policies: one row in
+-- analysis per analysed snapshot (version: insights.ANALYSIS_VERSION, re-run on change).
+CREATE TABLE IF NOT EXISTS analysis (
+    snapshot_id INTEGER PRIMARY KEY REFERENCES snapshots(id) ON DELETE CASCADE,
+    version     INTEGER NOT NULL,
+    analyzed_at TEXT NOT NULL
+);
+
+-- Effective permissions (effective.py): one row per grant; policies is a JSON list.
+CREATE TABLE IF NOT EXISTS role_permissions (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    role_name   TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    resource    TEXT NOT NULL,
+    condition   TEXT NOT NULL DEFAULT '',
+    policies    TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (snapshot_id, role_name, action, resource, condition)
+);
+
+-- Risk findings (findings.py). statements: JSON list of matched statement labels.
+CREATE TABLE IF NOT EXISTS role_findings (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    role_name   TEXT NOT NULL,
+    rule        TEXT NOT NULL,
+    severity    TEXT NOT NULL,
+    location    TEXT NOT NULL DEFAULT '',
+    why         TEXT NOT NULL DEFAULT '',
+    fix         TEXT NOT NULL DEFAULT '',
+    statements  TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (snapshot_id, role_name, rule, location)
+);
+
+-- Usage data of a snapshot (usage.py), every source optional. sources: JSON
+-- {source: status}; warnings: JSON list.
+CREATE TABLE IF NOT EXISTS usage_runs (
+    snapshot_id  INTEGER PRIMARY KEY REFERENCES snapshots(id) ON DELETE CASCADE,
+    collected_at TEXT NOT NULL,
+    window_days  INTEGER NOT NULL,
+    sources      TEXT NOT NULL DEFAULT '{}',
+    warnings     TEXT NOT NULL DEFAULT '[]'
+);
+
+-- iam:GenerateServiceLastAccessedDetails + GetServiceLastAccessedDetails (service level).
+CREATE TABLE IF NOT EXISTS service_last_accessed (
+    snapshot_id        INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    role_name          TEXT NOT NULL,
+    service_namespace  TEXT NOT NULL,
+    service_name       TEXT NOT NULL DEFAULT '',
+    last_authenticated TEXT NOT NULL DEFAULT '',  -- '' never (in the tracking period)
+    last_region        TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (snapshot_id, role_name, service_namespace)
+);
+
+-- cloudtrail:LookupEvents (AssumeRole*), aggregated per role, caller and source.
+CREATE TABLE IF NOT EXISTS assume_events (
+    snapshot_id    INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    role_name      TEXT NOT NULL,
+    event_name     TEXT NOT NULL,
+    principal      TEXT NOT NULL,
+    principal_type TEXT NOT NULL DEFAULT '',
+    source         TEXT NOT NULL DEFAULT '',   -- source IP address or AWS service
+    count          INTEGER NOT NULL DEFAULT 0,
+    errors         INTEGER NOT NULL DEFAULT 0,
+    last_time      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (snapshot_id, role_name, event_name, principal, source)
+);
+
+-- access-analyzer:ListAnalyzers + ListFindings / ListFindingsV2 (active findings).
+CREATE TABLE IF NOT EXISTS analyzer_findings (
+    snapshot_id   INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    analyzer      TEXT NOT NULL,
+    finding_id    TEXT NOT NULL,
+    resource      TEXT NOT NULL DEFAULT '',
+    resource_type TEXT NOT NULL DEFAULT '',
+    finding_type  TEXT NOT NULL DEFAULT '',
+    status        TEXT NOT NULL DEFAULT '',
+    detail        TEXT NOT NULL DEFAULT '',  -- principal / actions / condition summary
+    updated_at    TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (snapshot_id, analyzer, finding_id)
+);
+
 -- Local drafts cloned from a collected role. Never written to AWS. original / model are JSON
 -- role models (see drafts.py): original is frozen at clone time for the diff.
 CREATE TABLE IF NOT EXISTS drafts (

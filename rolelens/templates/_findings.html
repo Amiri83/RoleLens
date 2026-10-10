@@ -1,0 +1,21 @@
+{# Severity badge and the findings list of a role (role page, insights). #}
+{% macro severity(s) -%}
+  <span class="badge sev-{{ s }}">{{ s }}</span>
+{%- endmacro %}
+
+{% macro finding_list(findings) -%}
+  {% for f in findings %}
+  <details class="card finding">
+    <summary>{{ severity(f.severity) }} <b>{{ f.title }}</b>
+      <span class="muted small">{{ f.where }}{% if f.statements %} · statement{{ '' if f.statements | length == 1 else 's' }} {{ f.statements | join(', ') }}{% endif %}</span></summary>
+    <p><b>Why:</b> {{ f.why }}</p>
+    <div class="row" style="justify-content: space-between; align-items: center">
+      <b>Suggested fix</b>
+      <button type="button" class="secondary" data-copy="#fix-{{ loop.index }}">Copy</button>
+    </div>
+    <pre class="code" id="fix-{{ loop.index }}">{{ f.fix }}</pre>
+  </details>
+  {% else %}
+  <p class="muted">No risk findings.</p>
+  {% endfor %}
+{%- endmacro %}

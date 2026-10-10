@@ -47,11 +47,32 @@ def clone(
     if model is None:
         return None
     original = editable(model)
+    return create(conn, account_ref, snap_id, role_name, original, original)
+
+
+def create(
+    conn: sqlite3.Connection,
+    account_ref: int | None,
+    snap_id: int,
+    source_role: str,
+    original: dict[str, Any],
+    model: dict[str, Any],
+) -> int:
+    """Store a draft whose diff baseline is ``original`` (e.g. a merge of two roles:
+    the first role as original, the merged role as model); returns its id."""
     now = _now()
     cur = conn.execute(
         "INSERT INTO drafts(account_ref, snapshot_id, source_role, original, model, created_at, "
         "updated_at) VALUES(?,?,?,?,?,?,?)",
-        (account_ref, snap_id, role_name, json.dumps(original), json.dumps(original), now, now),
+        (
+            account_ref,
+            snap_id,
+            source_role,
+            json.dumps(editable(original)),
+            json.dumps(editable(model)),
+            now,
+            now,
+        ),
     )
     return int(cur.lastrowid or 0)
 

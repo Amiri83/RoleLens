@@ -5,8 +5,10 @@ Local web app to explore, graph and safely redesign AWS IAM roles.
 RoleLens collects your IAM roles **read-only**, shows who can assume each role and what it can
 do as an interactive graph, and lets you clone a role into a local **draft**, edit its trust and
 permission policies with live IAM validation, diff it against the original and export policy
-JSON or Terraform. **RoleLens never writes to AWS**: every boto3 client refuses any operation that
-is not `List*` / `Get*`, and drafts only ever live in the local SQLite database.
+JSON or Terraform. **Insights** flag risky roles, unused permissions and duplicate or
+overlapping roles. **RoleLens never writes to AWS**: every boto3 client refuses any operation
+that is not `List*` / `Get*` (plus two read-only reports allowed by exact name, see Security),
+and drafts only ever live in the local SQLite database.
 
 Same stack and conventions as [IPLens](https://github.com/Amiri83/IPLens): Flask + SQLite, one
 data directory, Fernet-encrypted credentials, background jobs with a progress modal, a
@@ -24,10 +26,35 @@ redacting log file and Host / CSRF guards.
 - **Roles**: list with path, last used, trust type, flags, number of policies and trusted
   principals. Column filters: name / path / ARN / principal search, last used (never, more
   than 30 / 90 / 180 days ago), trust type (service, same account, cross-account, OIDC, SAML),
-  service-linked, permissions boundary, inline policies and number of policies. Filters live
-  in the URL and are applied by the server; **Export to Excel** downloads exactly the rows
-  shown (openpyxl: frozen header row, autofilter, plus an "Export" sheet listing the account,
-  snapshot time and applied filters).
+  service-linked, permissions boundary, inline policies, number of policies and risk finding.
+  Filters live in the URL and are applied by the server; **Export to Excel** downloads exactly
+  the rows shown (openpyxl: frozen header row, autofilter, a "Findings" sheet with severity,
+  why and suggested fix of every finding of those roles, plus an "Export" sheet listing the
+  account, snapshot time and applied filters).
+- **Effective permissions** per role, computed at the end of every collection and stored in
+  SQLite: the union of every policy (inline, customer and AWS managed), wildcards expanded
+  against the built-in action catalog (a wildcard is also kept as-is, since it can grant
+  actions the catalog does not list); unconditional `Deny` on `"*"` is subtracted.
+  Permissions boundaries and narrower `Deny` statements are not evaluated, so the result may
+  overstate, never understate.
+- **Risk findings**, each with a severity, why it matters and a suggested fix snippet:
+  admin-equivalent (`*`, `iam:*`, `<service>:*` on `"*"`, `NotAction`, AdministratorAccess),
+  wildcard action and/or resource, `iam:PassRole` on `"*"`, cross-account trust without an
+  `sts:ExternalId` condition, trust to another account's root, OIDC trust without a `:sub`
+  condition, no permissions boundary, only inline policies.
+- **Insights dashboard**: counts per finding type (each links to the filtered Roles list), top
+  risky roles, top unused permissions, Access Analyzer findings.
+- **Usage data** (optional background job, every source optional — a missing permission is a
+  warning): role last used; services granted but not used in 90 days
+  (`iam:GenerateServiceLastAccessedDetails` + `GetServiceLastAccessedDetails`, service level);
+  who assumes each role, how often, when last and from which source IP / service
+  (`cloudtrail:LookupEvents` for `AssumeRole*`, 90 days, account region and `us-east-1`);
+  IAM Access Analyzer findings when an analyzer exists (`access-analyzer:ListAnalyzers`,
+  `ListFindings`).
+- **Recommendations**: duplicate roles (same effective permissions and trust) and overlapping
+  pairs (Jaccard similarity of the effective actions ≥ 0.8, configurable in Settings or per
+  view), with a side-by-side diff and a suggested merged role — exportable as JSON / Terraform
+  through the regular export, or opened as a draft.
 - **Role graph** (cytoscape.js, vendored; Grid layout by default, also dagre hierarchy,
   breadth-first, concentric, circle): principals that can assume → role → policies → services →
   actions → resources. Allow edges are green, Deny edges red with a bar end, statements with a
@@ -53,7 +80,7 @@ redacting log file and Host / CSRF guards.
   `aws_iam_policy` + `aws_iam_role_policy_attachment`; AWS managed policies attached by ARN),
   `terraform fmt` style, copy or download.
 
-Planned for phase 2: policy simulator, unused-permission findings, UI polish.
+Planned: policy simulator, permissions boundary evaluation, UI polish.
 
 ## Install and run
 
@@ -71,12 +98,18 @@ instead of the generated `secret.key` file.
 
 `iam:ListRoles`, `iam:GetRole`, `iam:ListAttachedRolePolicies`, `iam:ListRolePolicies`,
 `iam:GetRolePolicy`, `iam:GetPolicy`, `iam:GetPolicyVersion` (`sts:GetCallerIdentity` needs
-none).
+none). Optional, for usage data: `iam:GenerateServiceLastAccessedDetails`,
+`iam:GetServiceLastAccessedDetails`, `cloudtrail:LookupEvents`,
+`access-analyzer:ListAnalyzers`, `access-analyzer:ListFindings`.
 
 ## Security
 
 - Read-only AWS: a botocore `before-call` hook on every client rejects any operation that is
-  not `List*` / `Get*` (and secret-returning calls such as `sts:GetSessionToken`).
+  not `List*` / `Get*` (and secret-returning calls such as `sts:GetSessionToken`). The only
+  other operations allowed, by exact name, are the read-only reports
+  `iam:GenerateServiceLastAccessedDetails` and `cloudtrail:LookupEvents`.
+- Usage data (including CloudTrail source IP addresses) stays in the local database; the log
+  file only records counts.
 - Credentials are never rendered, never logged (the log file redacts key ids, secrets and
   tokens) and never part of an error message.
 - Only `127.0.0.1` / `localhost` Host headers are served (DNS rebinding); every POST needs the

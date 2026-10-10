@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% from "_macros.html" import no_data with context %}
+{% block title %}Recommendations{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('insights_page') }}" class="back-link">← Insights</a></p>
+<h1>Recommendations</h1>
+<div id="recommendations-data" data-refresh>
+{% if not snap %}
+  {{ no_data() }}
+{% else %}
+<p class="muted">Roles compared by their effective permissions (every policy, wildcards expanded). Service-linked
+  roles and roles without permissions are left out.</p>
+
+<h2>Duplicate roles ({{ duplicates | length }} group{{ '' if duplicates | length == 1 else 's' }})</h2>
+<p class="muted small">Same effective permissions and the same trust policy: one role of each group is enough.</p>
+<table class="insights" id="duplicates">
+  <thead><tr><th>Roles</th><th></th></tr></thead>
+  <tbody>
+  {% for group in duplicates %}
+    <tr>
+      <td>{% for name in group %}<a href="{{ url_for('role_page', name=name) }}" class="tag">{{ name }}</a> {% endfor %}</td>
+      <td><a class="btn secondary" href="{{ url_for('insights_compare', a=group[0], b=group[1]) }}">Compare</a></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="2" class="muted">No duplicates.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<div class="row" style="justify-content: space-between; align-items: center">
+  <h2>Overlapping roles ({{ overlaps | length }})</h2>
+  <form method="get" action="{{ url_for('insights_recommendations') }}" class="row" style="align-items: center; gap: .4rem">
+    <label for="threshold" class="inline-label">Jaccard ≥</label>
+    <input id="threshold" name="threshold" type="number" min="0.5" max="1" step="0.05" value="{{ threshold }}" class="num">
+    <button type="submit" class="secondary">Apply</button>
+    <span class="muted small">default {{ default_threshold }} (<a href="{{ url_for('settings_page') }}">Settings</a>)</span>
+  </form>
+</div>
+<p class="muted small">Pairs whose effective action sets share at least {{ (threshold * 100) | round | int }}% of their union
+  (|A ∩ B| / |A ∪ B|); <b>subset</b> means every action of the first role is also granted by the second.
+  {% if overlaps | length >= limit %}Only the {{ limit }} most similar pairs are listed.{% endif %}</p>
+<table class="insights" id="overlaps">
+  <thead><tr><th>Role A</th><th>Role B</th><th>Jaccard</th><th>Relation</th><th>Actions (only A / common / only B)</th><th>Trust</th><th></th></tr></thead>
+  <tbody>
+  {% for o in overlaps %}
+    <tr>
+      <td><a href="{{ url_for('role_page', name=o.a) }}">{{ o.a }}</a></td>
+      <td><a href="{{ url_for('role_page', name=o.b) }}">{{ o.b }}</a></td>
+      <td>{{ '%.2f' | format(o.jaccard) }}</td>
+      <td><span class="badge">{{ {'subset': 'A ⊂ B', 'superset': 'A ⊃ B', 'equal': 'same actions', 'overlap': 'overlap'}[o.relation] }}</span></td>
+      <td>{{ o.only_a }} / {{ o.common }} / {{ o.only_b }}</td>
+      <td>{% if o.same_trust %}<span class="badge ok">same</span>{% else %}<span class="badge warn">different</span>{% endif %}</td>
+      <td><a class="btn secondary" href="{{ url_for('insights_compare', a=o.a, b=o.b) }}">Compare &amp; merge</a></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="muted">No pair reaches the threshold.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+</div>
+{% endblock %}

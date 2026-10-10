@@ -36,7 +36,7 @@
 </form>
 <table id="roles-table" class="roles">
   <thead>
-    <tr><th>Role</th><th>Path</th><th>Last used</th><th>Trust</th><th>Flags</th><th>Policies</th><th></th></tr>
+    <tr><th>Role</th><th>Path</th><th>Last used</th><th>Trust</th><th>Flags</th><th>Policies</th><th>Findings</th><th></th></tr>
     <tr class="col-filters">
       <td colspan="2"><input name="q" form="role-filters" type="search" value="{{ f.q }}" placeholder="name, path, ARN or trusted principal"
           autocomplete="off" aria-label="Filter by name, path, ARN or trusted principal"></td>
@@ -48,6 +48,7 @@
             placeholder="min" aria-label="Minimum number of policies" class="num">–<input name="pmax" form="role-filters" type="number" min="0"
             value="{{ f.pmax if f.pmax is not none else '' }}" placeholder="max" aria-label="Maximum number of policies" class="num"></span>
           {{ choice('inline', 'Inline', {'yes': 'has inline', 'no': 'no inline'}, f.inline) }}</td>
+      <td>{{ choice('finding', 'Finding', finding_choices, f.finding) }}</td>
       <td></td>
     </tr>
   </thead>
@@ -67,6 +68,7 @@
         {% if not r.service_linked and not r.boundary %}<span class="muted">–</span>{% endif %}</td>
       <td title="{{ r.managed }} managed · {{ r.inline }} inline">{{ r.policies }}
         <span class="muted small">({{ r.managed }} managed, {{ r.inline }} inline)</span></td>
+      <td>{% for rule, sev in r.findings.items() %}<a href="{{ url_for('role_page', name=r.name) }}#findings" class="badge sev-{{ sev }}" title="{{ finding_choices[rule] }} ({{ sev }})">{{ rule }}</a> {% else %}<span class="muted">–</span>{% endfor %}</td>
       <td style="white-space: nowrap">
         <a class="btn secondary" href="{{ url_for('role_page', name=r.name) }}">Graph</a>
         <form class="inline" method="post" action="{{ url_for('role_clone', name=r.name) }}">
@@ -76,7 +78,7 @@
       </td>
     </tr>
   {% else %}
-    <tr><td colspan="7" class="muted">No role matches{% if f.active %} the filters — <a href="{{ url_for('roles') }}">clear them</a>{% endif %}.</td></tr>
+    <tr><td colspan="8" class="muted">No role matches{% if f.active %} the filters — <a href="{{ url_for('roles') }}">clear them</a>{% endif %}.</td></tr>
   {% endfor %}
   </tbody>
 </table>

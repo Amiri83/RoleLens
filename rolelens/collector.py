@@ -4,6 +4,8 @@ API calls (all read-only, see :mod:`rolelens.aws`): ``sts:GetCallerIdentity``,
 ``iam:ListRoles``, ``iam:GetRole`` (trust policy, last used), ``iam:ListAttachedRolePolicies``,
 ``iam:ListRolePolicies``, ``iam:GetRolePolicy``, ``iam:GetPolicy`` and
 ``iam:GetPolicyVersion`` (the default version of every attached managed policy).
+The finished snapshot is analysed locally (effective permissions and risk findings, see
+:mod:`rolelens.insights`).
 """
 
 from __future__ import annotations
@@ -17,7 +19,8 @@ from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
-from .aws import AwsGateway
+from . import insights
+from .aws import AwsGateway, error_code, iso_time
 from .db import closing
 from .jobs import JobCancelled, NullProgress, Progress
 from .policy import decode_document, is_aws_managed
@@ -40,19 +43,6 @@ def _paginate(client: Any, op: str, key: str, **kwargs: Any) -> list[Any]:
     for page in client.get_paginator(op).paginate(**kwargs):
         out.extend(page.get(key, []))
     return out
-
-
-def _iso(value: Any) -> str:
-    if isinstance(value, datetime):
-        ts = value if value.tzinfo else value.replace(tzinfo=UTC)
-        return ts.astimezone(UTC).isoformat(timespec="seconds")
-    return str(value or "")
-
-
-def _error_code(exc: Exception) -> str:
-    if isinstance(exc, ClientError):
-        return exc.response.get("Error", {}).get("Code", "") or "ClientError"
-    return type(exc).__name__
 
 
 class Collector:
@@ -115,7 +105,7 @@ class Collector:
         try:
             result.account_id = self.gw.caller_identity()["account"]
         except (BotoCoreError, ClientError) as exc:
-            result.warnings.append(f"sts:GetCallerIdentity unavailable ({_error_code(exc)})")
+            result.warnings.append(f"sts:GetCallerIdentity unavailable ({error_code(exc)})")
 
         self.progress.check()
         self.progress.step("iam:ListRoles")
@@ -180,6 +170,12 @@ class Collector:
                 "aws_managed, document) VALUES(?,?,?,?,?,?,?)",
                 managed_rows,
             )
+            self.progress.step("analysing effective permissions and findings")
+            try:
+                insights.analyze(conn, snap_id)
+            except Exception:  # noqa: BLE001 - the snapshot is useful without insights
+                log.exception("analysis of snapshot %s failed", snap_id)
+                result.warnings.append("insights analysis failed (see the log)")
             conn.execute(
                 "UPDATE snapshots SET status='ok', account_id=?, warnings=? WHERE id=?",
                 (result.account_id, json.dumps(result.warnings), snap_id),
@@ -195,7 +191,7 @@ class Collector:
         try:
             role = iam.get_role(RoleName=name)["Role"]
         except (BotoCoreError, ClientError) as exc:
-            msg = f"iam:GetRole ({name}) skipped ({_error_code(exc)}); ListRoles data used"
+            msg = f"iam:GetRole ({name}) skipped ({error_code(exc)}); ListRoles data used"
             log.warning(msg)
             result.warnings.append(msg)
         last_used = role.get("RoleLastUsed") or {}
@@ -212,10 +208,10 @@ class Collector:
             role.get("Arn", ""),
             role.get("Path", "/"),
             role.get("Description", "") or "",
-            _iso(role.get("CreateDate")),
+            iso_time(role.get("CreateDate")),
             int(role.get("MaxSessionDuration") or 3600),
             boundary.get("PermissionsBoundaryArn", ""),
-            _iso(last_used.get("LastUsedDate")),
+            iso_time(last_used.get("LastUsedDate")),
             last_used.get("Region", "") or "",
             json.dumps(trust),
         )
@@ -227,7 +223,7 @@ class Collector:
             raw = iam.get_role_policy(RoleName=role, PolicyName=policy)["PolicyDocument"]
             return decode_document(raw)
         except (BotoCoreError, ClientError, ValueError) as exc:
-            msg = f"iam:GetRolePolicy ({role}/{policy}) skipped ({_error_code(exc)})"
+            msg = f"iam:GetRolePolicy ({role}/{policy}) skipped ({error_code(exc)})"
             log.warning(msg)
             result.warnings.append(msg)
             return None
@@ -244,7 +240,7 @@ class Collector:
             raw = iam.get_policy_version(PolicyArn=arn, VersionId=version)["PolicyVersion"]
             doc = decode_document(raw.get("Document"))
         except (BotoCoreError, ClientError, ValueError) as exc:
-            msg = f"iam:GetPolicy/GetPolicyVersion ({name}) skipped ({_error_code(exc)})"
+            msg = f"iam:GetPolicy/GetPolicyVersion ({name}) skipped ({error_code(exc)})"
             log.warning(msg)
             result.warnings.append(msg)
         return (
@@ -263,7 +259,7 @@ class Collector:
         try:
             return fn()
         except (BotoCoreError, ClientError) as exc:
-            msg = f"{what} skipped ({_error_code(exc)})"
+            msg = f"{what} skipped ({error_code(exc)})"
             log.warning(msg)
             result.warnings.append(msg)
             return []

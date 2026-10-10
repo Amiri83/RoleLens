@@ -1,6 +1,7 @@
 """Excel export of the Roles page (openpyxl): the rows of the current filtered view.
 
 Sheet "Roles" has a bold, frozen header row and an autofilter over every column; sheet
+"Findings" lists the risk findings of those roles (severity, why, suggested fix); sheet
 "Export" records the account, the snapshot time and the filters that were applied.
 Every text cell is written as a string, so a value such as ``=cmd`` taken from a role
 description can never become a formula.
@@ -19,6 +20,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from .filters import RoleFilters
+from .findings import RULES
 from .policy import TRUST_TYPES
 
 DATE_FORMAT = "yyyy-mm-dd hh:mm"
@@ -42,6 +44,11 @@ def _yes_no(flag: Any) -> str:
     return "yes" if flag else "no"
 
 
+def _findings(by_rule: Mapping[str, str]) -> str:
+    """``"Title (severity), ..."`` of a row's findings (rule -> worst severity)."""
+    return ", ".join(f"{RULES[k].title if k in RULES else k} ({v})" for k, v in by_rule.items())
+
+
 Column = tuple[str, int, Callable[[Mapping[str, Any]], Any]]
 COLUMNS: list[Column] = [
     ("Role", 32, lambda r: r["name"]),
@@ -58,8 +65,21 @@ COLUMNS: list[Column] = [
     ("Managed policies", 10, lambda r: r["managed"]),
     ("Inline policies", 10, lambda r: r["inline"]),
     ("Policies", 10, lambda r: r["policies"]),
+    ("Highest severity", 12, lambda r: r.get("severity", "")),
+    ("Findings", 48, lambda r: _findings(r.get("findings") or {})),
 ]
 HEADERS = [c[0] for c in COLUMNS]
+FINDING_COLUMNS: list[Column] = [
+    ("Role", 32, lambda f: f["role"]),
+    ("Severity", 10, lambda f: f["severity"]),
+    ("Finding", 34, lambda f: f["title"]),
+    ("Rule", 26, lambda f: f["rule"]),
+    ("Where", 28, lambda f: f["where"]),
+    ("Statements", 18, lambda f: ", ".join(f["statements"])),
+    ("Why", 60, lambda f: f["why"]),
+    ("Suggested fix", 60, lambda f: f["fix"]),
+]
+FINDING_HEADERS = [c[0] for c in FINDING_COLUMNS]
 
 
 def _put(ws: Any, row: int, col: int, value: Any) -> None:
@@ -72,6 +92,21 @@ def _put(ws: Any, row: int, col: int, value: Any) -> None:
         cell.number_format = DATE_FORMAT
 
 
+def _table(ws: Any, columns: list[Column], rows: Sequence[Mapping[str, Any]]) -> None:
+    """A bold, frozen header row, one row per item and an autofilter over every column."""
+    bold = Font(bold=True)
+    for col, (title, width, _get) in enumerate(columns, start=1):
+        _put(ws, 1, col, title)
+        ws.cell(row=1, column=col).font = bold
+        ws.cell(row=1, column=col).fill = HEADER_FILL
+        ws.column_dimensions[get_column_letter(col)].width = width
+    for r, row in enumerate(rows, start=2):
+        for col, (_title, _width, get) in enumerate(columns, start=1):
+            _put(ws, r, col, get(row))
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{len(rows) + 1}"
+
+
 def roles_workbook(
     rows: Sequence[Mapping[str, Any]],
     filters: RoleFilters,
@@ -79,23 +114,17 @@ def roles_workbook(
     account: str,
     taken_at: str,
     total: int,
+    findings: Sequence[Mapping[str, Any]] | None = None,
     now: datetime | None = None,
 ) -> bytes:
-    """The ``.xlsx`` file of ``rows`` (already filtered by ``filters``)."""
+    """The ``.xlsx`` file of ``rows`` (already filtered by ``filters``) and the
+    ``findings`` (dicts of :func:`rolelens.insights.findings_by_role`) of those rows."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Roles"
+    _table(ws, COLUMNS, rows)
+    _table(wb.create_sheet("Findings"), FINDING_COLUMNS, findings or [])
     bold = Font(bold=True)
-    for col, (title, width, _get) in enumerate(COLUMNS, start=1):
-        _put(ws, 1, col, title)
-        ws.cell(row=1, column=col).font = bold
-        ws.cell(row=1, column=col).fill = HEADER_FILL
-        ws.column_dimensions[get_column_letter(col)].width = width
-    for r, row in enumerate(rows, start=2):
-        for col, (_title, _width, get) in enumerate(COLUMNS, start=1):
-            _put(ws, r, col, get(row))
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}{len(rows) + 1}"
 
     info = wb.create_sheet("Export")
     now = now or datetime.now(UTC)
@@ -104,6 +133,7 @@ def roles_workbook(
         ("Collected (UTC)", _utc_naive(taken_at)),
         ("Exported (UTC)", _utc_naive(now.isoformat())),
         ("Roles", f"{len(rows)} of {total}"),
+        ("Findings", len(findings or [])),
         ("Filters", "none" if not filters.active else ""),
         *filters.describe(),
     ]
