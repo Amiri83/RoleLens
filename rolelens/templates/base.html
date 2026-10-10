@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}RoleLens{% endblock %} · RoleLens</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="{{ url_for('static', filename='localtime.js') }}" defer></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+<header>
+  <span class="brand">RoleLens</span>
+  <nav class="tabs" aria-label="Main">
+    {% set ep = request.endpoint or '' %}
+    {% macro nav_link(endpoint, label, active) -%}
+      <a href="{{ url_for(endpoint) }}"{% if active %} class="active" aria-current="page"{% endif %}>{{ label }}</a>
+    {%- endmacro %}
+    {{ nav_link('roles', 'Roles', ep.startswith('role')) }}
+    {{ nav_link('drafts_list', 'Drafts', ep.startswith('draft')) }}
+    {{ nav_link('settings_page', 'Settings', ep.startswith('settings') or ep.startswith('account')) }}
+    {{ nav_link('logs', 'Logs', ep == 'logs') }}
+  </nav>
+  <span class="ctx"{% if active_account %} title="auth: {{ active_account.mode_label }}"{% endif %}>
+    {% if header_snap %}
+      viewing <b>{{ account_label(header_snap.account_id, header_snap.account_name) }}</b> ·
+      collected {{ header_snap.taken_at | localtime }}
+    {% elif active_account %}
+      viewing <b>{{ active_label }}</b> · no data yet
+    {% endif %}
+    {% if active_account and active_account.identity_warning %}
+      · <a class="ctx-warn" href="{{ url_for('settings_page') }}" title="{{ active_account.identity_warning }}">AWS account changed</a>
+    {% endif %}
+    {% if active_account and active_account.problem %}
+      · <a class="ctx-warn" href="{{ url_for('account_edit', account_id=active_account.id) }}">{{ active_account.problem }}</a>
+    {% elif active_account and active_account.auth_mode == 'temporary' %}
+      · {{ active_account.status }}
+    {% endif %}
+  </span>
+  {% if account_choices %}
+  <form class="account-switch" method="post" action="{{ url_for('account_activate') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {# Role and draft pages belong to one account: after switching, land on Roles. #}
+    <input type="hidden" name="next" value="{{ url_for('roles') if ep.startswith('role_') or ep.startswith('draft_') else request.full_path.rstrip('?') }}">
+    <label for="account-select" class="sr-only">Active account</label>
+    <select id="account-select" name="account_id" onchange="this.form.submit()">
+      {% for c in account_choices %}
+        <option value="{{ c.id }}" {{ 'selected' if active_account and c.id == active_account.id }}>{{ c.label }}</option>
+      {% endfor %}
+    </select>
+    <noscript><button type="submit" class="secondary">Switch</button></noscript>
+  </form>
+  {% else %}
+  <a class="ctx-warn" href="{{ url_for('account_new') }}">add an AWS account</a>
+  {% endif %}
+</header>
+<main>
+  {% for category, message in get_flashed_messages(with_categories=true) %}
+    <div class="flash {{ category }}">{{ message }}</div>
+  {% endfor %}
+  {% block content %}{% endblock %}
+</main>
+{# Background jobs (IAM collection): progress modal, see jobs.js. #}
+<div id="job-modal" class="job-modal" role="dialog" aria-modal="true" aria-labelledby="job-title" hidden
+     data-csrf="{{ csrf_token }}"
+     data-current-url="{{ url_for('job_current') }}"
+     data-status-url="{{ url_for('job_status', job_id='__ID__') }}"
+     data-cancel-url="{{ url_for('job_cancel', job_id='__ID__') }}">
+  <div class="job-box card">
+    <h2 id="job-title">Working…</h2>
+    <p class="job-step" id="job-step" aria-live="polite"></p>
+    <progress id="job-progress" max="1" value="0"></progress>
+    <p class="muted small"><span id="job-counts"></span> · elapsed <span id="job-elapsed">0s</span> · <span id="job-state"></span></p>
+    <ul id="job-messages" class="job-messages"></ul>
+    <details class="job-log-box" open>
+      <summary>Log (live)</summary>
+      <pre id="job-log" class="job-log"></pre>
+    </details>
+    <div class="row job-actions">
+      <button type="button" class="danger" id="job-cancel">Cancel</button>
+      <button type="button" class="secondary" id="job-hide" title="Keep it running in the background">Hide</button>
+      <button type="button" id="job-close" hidden>Close and reload</button>
+    </div>
+  </div>
+</div>
+<button type="button" id="job-badge" class="job-badge" hidden></button>
+<script src="{{ url_for('static', filename='jobs.js') }}" defer></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

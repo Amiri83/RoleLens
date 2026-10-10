@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Export {{ draft.model.role_name }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('draft_edit', draft_id=draft.id) }}" class="back-link">← Draft #{{ draft.id }}</a></p>
+<h1>Export: {{ draft.model.role_name }}</h1>
+<p class="muted">Generated locally from the saved draft. RoleLens never applies anything: review the output and
+  run <span class="mono">terraform plan</span> yourself.</p>
+{% if has_errors %}
+<div class="flash error">This draft has validation errors; the export below would be rejected by IAM.
+  <a href="{{ url_for('draft_edit', draft_id=draft.id) }}">Fix them in the editor</a>.
+  <ul>{% for i in issues if i.level == 'error' %}<li><b>{{ i.where }}</b>{% if i.path %} <span class="mono">{{ i.path }}</span>{% endif %}: {{ i.message }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+<section class="card export-block">
+  <div class="row" style="justify-content: space-between">
+    <h2 style="margin: 0">Terraform (HCL)</h2>
+    <div class="row">
+      <button type="button" class="secondary" data-copy="#hcl">Copy</button>
+      <a class="btn" href="{{ url_for('draft_export_tf', draft_id=draft.id) }}">Download .tf</a>
+    </div>
+  </div>
+  <p class="muted small"><span class="mono">aws_iam_role</span> with <span class="mono">aws_iam_policy_document</span>
+    data sources, <span class="mono">aws_iam_role_policy</span> (inline), <span class="mono">aws_iam_policy</span> +
+    <span class="mono">aws_iam_role_policy_attachment</span> (customer managed) and attachments by ARN (AWS managed).</p>
+  <pre class="code" id="hcl">{{ hcl }}</pre>
+</section>
+
+<section class="card export-block">
+  <div class="row" style="justify-content: space-between">
+    <h2 style="margin: 0">Policy JSON</h2>
+    <a class="btn" href="{{ url_for('draft_export_zip', draft_id=draft.id) }}">Download all (.zip)</a>
+  </div>
+  {% for path, content in files.items() %}
+  <details class="json-file" {{ 'open' if loop.index <= 2 }}>
+    <summary class="mono">{{ path }}</summary>
+    <div class="row">
+      <button type="button" class="secondary" data-copy="#file-{{ loop.index }}">Copy</button>
+      <a class="btn secondary" href="{{ url_for('draft_export_file', draft_id=draft.id, path=path) }}">Download</a>
+    </div>
+    <pre class="code" id="file-{{ loop.index }}">{{ content }}</pre>
+  </details>
+  {% endfor %}
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='copy.js') }}" defer></script>
+{% endblock %}

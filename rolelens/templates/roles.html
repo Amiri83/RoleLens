@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% from "_macros.html" import no_data with context %}
+{% block title %}Roles{% endblock %}
+{% block content %}
+<div class="row" style="justify-content: space-between">
+  <h1>IAM roles</h1>
+  {% if active_account %}
+  <form method="post" action="{{ url_for('collect') }}" data-job="collect">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" title="Read-only: iam:ListRoles, GetRole, List*/GetRolePolicy, GetPolicy, GetPolicyVersion">Collect from AWS</button>
+  </form>
+  {% endif %}
+</div>
+{% if not snap %}
+  {{ no_data() }}
+{% else %}
+<form method="get" class="row search-row" role="search">
+  <label for="q" class="sr-only">Search roles</label>
+  <input id="q" name="q" type="search" value="{{ q }}" size="40" placeholder="name, path, ARN or trusted principal"
+         autocomplete="off" data-filter="#roles-table">
+  <button type="submit" class="secondary">Search</button>
+  <span class="muted small"><span id="role-count">{{ rows | length }}</span> role{{ '' if rows | length == 1 else 's' }}</span>
+</form>
+<table id="roles-table" class="roles">
+  <thead><tr><th>Role</th><th>Path</th><th>Last used</th><th>Policies</th><th>Trusted principals</th><th></th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr data-search="{{ (r.name ~ ' ' ~ r.path ~ ' ' ~ r.arn ~ ' ' ~ (r.principals | join(' '))) | lower }}">
+      <td><a href="{{ url_for('role_page', name=r.name) }}"><b>{{ r.name }}</b></a>
+        {% if r.description %}<div class="muted small">{{ r.description }}</div>{% endif %}</td>
+      <td class="mono">{{ r.path }}</td>
+      <td>{% if r.last_used_at %}{{ r.last_used_at | localtime }}{% if r.last_used_region %} <span class="muted small">{{ r.last_used_region }}</span>{% endif %}
+          {% else %}<span class="badge warn">never / unknown</span>{% endif %}</td>
+      <td title="{{ r.managed }} managed · {{ r.inline }} inline">{{ r.policies }}
+        <span class="muted small">({{ r.managed }} managed, {{ r.inline }} inline)</span></td>
+      <td>{% for p in r.principals %}<span class="tag">{{ p }}</span> {% else %}<span class="muted">none</span>{% endfor %}</td>
+      <td style="white-space: nowrap">
+        <a class="btn secondary" href="{{ url_for('role_page', name=r.name) }}">Graph</a>
+        <form class="inline" method="post" action="{{ url_for('role_clone', name=r.name) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="secondary" title="Copy into a local draft (never written to AWS)">Clone to draft</button>
+        </form>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="muted">No role matches.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if history %}
+<details class="card history">
+  <summary>Collection history ({{ history | length }})</summary>
+  <table>
+    <thead><tr><th>#</th><th>Collected</th><th>Status</th><th>Roles</th><th>Warnings</th><th></th></tr></thead>
+    <tbody>
+    {% for h in history %}
+      <tr>
+        <td>{{ h.id }}</td>
+        <td>{{ h.taken_at | localtime }}</td>
+        <td><span class="badge {{ 'ok' if h.status == 'ok' else 'err' if h.status == 'failed' else '' }}">{{ h.status }}</span>
+          {% if h.error %}<span class="muted small">{{ h.error }}</span>{% endif %}</td>
+        <td>{{ h.role_count }}</td>
+        <td>{% if h.warnings %}<details><summary>{{ h.warnings | length }}</summary><ul class="small">{% for w in h.warnings %}<li>{{ w }}</li>{% endfor %}</ul></details>{% else %}–{% endif %}</td>
+        <td>
+          <form class="inline" method="post" action="{{ url_for('snapshot_delete', snap_id=h.id) }}"
+                onsubmit="return confirm('Delete this snapshot?')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+// Instant filter as you type (the Search button filters server-side without JavaScript).
+(function () {
+  "use strict";
+  const input = document.querySelector("input[data-filter]");
+  if (!input) return;
+  const rows = document.querySelectorAll(input.dataset.filter + " tbody tr[data-search]");
+  const count = document.getElementById("role-count");
+  input.addEventListener("input", () => {
+    const needle = input.value.trim().toLowerCase();
+    let shown = 0;
+    rows.forEach((tr) => {
+      const hit = !needle || tr.dataset.search.includes(needle);
+      tr.hidden = !hit;
+      if (hit) shown += 1;
+    });
+    count.textContent = shown;
+  });
+})();
+</script>
+{% endblock %}
