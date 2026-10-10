@@ -13,7 +13,7 @@
   <div><button type="submit">Filter</button></div>
 </form>
 <p class="muted">Log file directory: <span class="mono">{{ log_dir }}</span> (change it in Settings). Newest first.</p>
-<table>
+<table id="log-table" data-refresh>
   <thead><tr><th>Time</th><th>Level</th><th>Logger</th><th>Message</th></tr></thead>
   <tbody>
   {% for e in entries %}

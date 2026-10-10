@@ -21,7 +21,7 @@
     {{ nav_link('settings_page', 'Settings', ep.startswith('settings') or ep.startswith('account')) }}
     {{ nav_link('logs', 'Logs', ep == 'logs') }}
   </nav>
-  <span class="ctx"{% if active_account %} title="auth: {{ active_account.mode_label }}"{% endif %}>
+  <span class="ctx" id="header-ctx" data-refresh{% if active_account %} title="auth: {{ active_account.mode_label }}"{% endif %}>
     {% if header_snap %}
       viewing <b>{{ account_label(header_snap.account_id, header_snap.account_name) }}</b> ·
       collected {{ header_snap.taken_at | localtime }}
@@ -60,7 +60,9 @@
   {% endfor %}
   {% block content %}{% endblock %}
 </main>
-{# Background jobs (IAM collection): progress modal, see jobs.js. #}
+{# Background jobs (IAM collection): progress modal, see jobs.js. Close hides it (a running
+   job goes on in the background); after a job that changed data the page's
+   data-refresh regions are re-fetched in place (refresh.js). #}
 <div id="job-modal" class="job-modal" role="dialog" aria-modal="true" aria-labelledby="job-title" hidden
      data-csrf="{{ csrf_token }}"
      data-current-url="{{ url_for('job_current') }}"
@@ -78,12 +80,12 @@
     </details>
     <div class="row job-actions">
       <button type="button" class="danger" id="job-cancel">Cancel</button>
-      <button type="button" class="secondary" id="job-hide" title="Keep it running in the background">Hide</button>
-      <button type="button" id="job-close" hidden>Close and reload</button>
+      <button type="button" id="job-close">Close</button>
     </div>
   </div>
 </div>
 <button type="button" id="job-badge" class="job-badge" hidden></button>
+<script src="{{ url_for('static', filename='refresh.js') }}" defer></script>
 <script src="{{ url_for('static', filename='jobs.js') }}" defer></script>
 {% block scripts %}{% endblock %}
 </body>

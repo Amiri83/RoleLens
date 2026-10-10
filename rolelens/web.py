@@ -29,7 +29,7 @@ from markupsafe import Markup
 
 from . import drafts as drafts_mod
 from . import export as export_mod
-from . import queries
+from . import graph_export, queries
 from .accounts import (
     AUTH_MODE_LABELS,
     AUTH_MODES,
@@ -45,13 +45,15 @@ from .collector import Collector
 from .config import AppPaths, default_paths
 from .crypto import SecretBox
 from .db import closing, connect, init_db
+from .filters import LAST_USED, RoleFilters
 from .graph import build_graph
 from .jobs import KINDS as JOB_KINDS
 from .jobs import JobBusy, JobCancelled, JobContext, JobFailed, JobManager, Progress
 from .logging_setup import LEVELS, configure_logging, read_log
-from .policy import dumps
+from .policy import TRUST_TYPES, dumps
 from .settings import MAX_DISPLAY_NAME, REGIONS, Settings, SettingsStore
 from .validate import has_errors, validate_model
+from .xlsx import roles_workbook
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +71,12 @@ LAYOUTS = {
     "circle": "Circle",
 }
 NO_DATA = "No IAM data yet: collect the active account first."
+XLSX_MIMETYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+# Graph exports rendered on the server (PNG is rendered by cytoscape in the browser).
+GRAPH_FORMATS: dict[str, tuple[str, Callable[[graph_export.View], str]]] = {
+    "svg": ("image/svg+xml", graph_export.to_svg),
+    "drawio": ("application/vnd.jgraph.mxfile", graph_export.to_drawio),
+}
 
 
 def host_allowed(host: str, port: int | None) -> bool:
@@ -335,17 +343,51 @@ def _register(app: Flask) -> None:
         }
 
     app.add_template_filter(local_time, "localtime")
+    # Node-type icons of the live graph (the same images the SVG export embeds).
+    app.jinja_env.globals["graph_icons"] = graph_export.icon_data_uris()
 
     # -- roles -----------------------------------------------------------------------
+
+    def _filtered_roles(snap) -> tuple[RoleFilters, list[dict[str, Any]], int]:
+        """The column filters of the request and the rows they keep (page and export)."""
+        filters = RoleFilters.from_args(request.args)
+        rows = queries.role_list(_db(), snap["id"]) if snap else []
+        return filters, filters.apply(rows), len(rows)
 
     @app.get("/")
     def roles():
         snap = _snapshot_or_none()
-        q = request.args.get("q", "")[:200]
-        rows = queries.role_list(_db(), snap["id"], q) if snap else []
+        filters, rows, total = _filtered_roles(snap)
         ref = _active_ref()
         history = queries.recent_snapshots(_db(), ref, HISTORY_ROWS) if ref is not None else []
-        return render_template("roles.html", snap=snap, rows=rows, q=q, history=history)
+        return render_template(
+            "roles.html",
+            snap=snap,
+            rows=rows,
+            total=total,
+            f=filters,
+            last_used_choices=LAST_USED,
+            trust_choices=TRUST_TYPES,
+            history=history,
+        )
+
+    @app.get("/roles.xlsx")
+    def roles_xlsx():
+        """The Roles page as shown: same filters (query string), same rows."""
+        snap = _snapshot_or_none()
+        if snap is None:
+            abort(404, NO_DATA)
+        filters, rows, total = _filtered_roles(snap)
+        data = roles_workbook(
+            rows,
+            filters,
+            account=account_label(snap["account_id"], snap["account_name"]),
+            taken_at=snap["taken_at"],
+            total=total,
+        )
+        log.info("roles exported to Excel (%d of %d rows)", len(rows), total)
+        stamp = (utc_iso(snap["taken_at"]) or "")[:10]
+        return _download(data, f"rolelens-roles-{stamp}.xlsx", XLSX_MIMETYPE)
 
     def _role_or_404(name: str) -> dict[str, Any]:
         snap = _snapshot_or_none()
@@ -370,6 +412,21 @@ def _register(app: Flask) -> None:
     @app.get("/roles/<name>/graph.json")
     def role_graph(name: str):
         return jsonify(build_graph(_role_or_404(name)))
+
+    @app.post("/graph/export.<fmt>")
+    def graph_export_file(fmt: str):
+        """SVG / draw.io file of the graph view posted by graph.js (role page and editor):
+        only the visible nodes and edges, at their current positions."""
+        if fmt not in GRAPH_FORMATS:
+            abort(404)
+        try:
+            view = graph_export.parse_view(request.form.get("view"))
+        except graph_export.ViewError as exc:
+            abort(400, str(exc))
+        mimetype, render = GRAPH_FORMATS[fmt]
+        log.info("graph exported as %s (%d nodes, %d edges)", fmt, len(view.nodes), len(view.edges))
+        name = export_mod.identifier(view.name, set())
+        return _download(render(view).encode(), f"{name}-graph.{fmt}", mimetype)
 
     @app.post("/roles/<name>/clone")
     def role_clone(name: str):

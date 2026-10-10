@@ -21,12 +21,25 @@ redacting log file and Host / CSRF guards.
   last used), `iam:ListAttachedRolePolicies`, `iam:ListRolePolicies`, `iam:GetRolePolicy`,
   `iam:GetPolicy` + `iam:GetPolicyVersion` (default version). Everything is snapshotted in
   SQLite; a missing permission on one call becomes a warning.
-- **Roles**: searchable list with path, last used, number of policies and trusted principals.
+- **Roles**: list with path, last used, trust type, flags, number of policies and trusted
+  principals. Column filters: name / path / ARN / principal search, last used (never, more
+  than 30 / 90 / 180 days ago), trust type (service, same account, cross-account, OIDC, SAML),
+  service-linked, permissions boundary, inline policies and number of policies. Filters live
+  in the URL and are applied by the server; **Export to Excel** downloads exactly the rows
+  shown (openpyxl: frozen header row, autofilter, plus an "Export" sheet listing the account,
+  snapshot time and applied filters).
 - **Role graph** (cytoscape.js, vendored; Grid layout by default, also dagre hierarchy,
   breadth-first, concentric, circle): principals that can assume → role → policies → services →
   actions → resources. Allow edges are green, Deny edges red with a bar end, statements with a
   `Condition` are dashed, nodes reached by both are marked "mixed". Click a node for the
-  statements behind it.
+  statements behind it. Filter by node type and by effect (Allow / Deny).
+- **Graph export** (role page and draft editor) of the graph *as shown* — current layout,
+  filters and selection: **SVG** (self-contained, node icons embedded as `data:` URIs),
+  **PNG** (rendered by cytoscape) and **draw.io** (`.drawio` mxfile; AWS service nodes use the
+  `mxgraph.aws4` service shapes).
+- **Background jobs**: a progress modal with Cancel and Close (Close on a running job keeps it
+  going in the background). When a collection ends, closing the modal re-fetches the page's
+  data in place — no full page reload.
 - **Draft editor**: clone a role, edit role settings, the trust policy and the inline / customer
   managed policies in a JSON editor (line numbers, error line marker, indentation, format);
   add or remove policies (AWS managed policies are read-only: detach only). Validation covers
@@ -89,4 +102,6 @@ snapshots live in `tests/snapshots/`; after an intended output change run
 | cytoscape.js 3.34.3 (`dist/cytoscape.min.js`, unmodified) | `rolelens/static/vendor/cytoscape.min.js` | npm package `cytoscape@3.34.3` (same file as IPLens) | MIT – `rolelens/static/vendor/cytoscape.LICENSE` |
 | dagre (`dagre.min.js`, unmodified) | `rolelens/static/vendor/dagre.min.js` | npm package `dagre` (same file as IPLens) | MIT – `rolelens/static/vendor/dagre.LICENSE` |
 
-The JSON editor (`rolelens/static/jsonedit.js`) is RoleLens' own, dependency-free code.
+The JSON editor (`rolelens/static/jsonedit.js`), the in-place refresh (`refresh.js`), the graph
+icons and the SVG / draw.io writers (`rolelens/graph_export.py`) are RoleLens' own,
+dependency-free code.

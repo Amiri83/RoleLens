@@ -10,16 +10,18 @@
     <button type="submit" title="Copy into a local draft (never written to AWS)">Clone to draft</button>
   </form>
 </div>
-<p class="muted">
+<p class="muted" id="role-meta" data-refresh>
   {% if role.description %}{{ role.description }} · {% endif %}
   last used: {% if role.last_used_at %}{{ role.last_used_at | localtime }}{% if role.last_used_region %} ({{ role.last_used_region }}){% endif %}{% else %}never / unknown{% endif %}
   · max session {{ role.max_session_duration }}s
   {% if role.permissions_boundary %}· permissions boundary <span class="mono">{{ role.permissions_boundary }}</span>{% endif %}
 </p>
 
-{{ graph_panel(layouts, 'graph-data') }}
+{{ graph_panel(layouts, 'graph-data', role.role_name) }}
 <script type="application/json" id="graph-data">{{ graph | tojson }}</script>
 
+{# Re-fetched in place after a collection (refresh.js); the graph re-reads graph.json. #}
+<div id="role-docs" data-refresh>
 <h2>Trust policy</h2>
 <details class="card"><summary>JSON</summary><pre class="json">{{ dumps(role.trust) }}</pre></details>
 
@@ -34,6 +36,7 @@
 {% else %}
 <p class="muted">No policies attached.</p>
 {% endfor %}
+</div>
 {% endblock %}
 {% block scripts %}
 {{ graph_scripts() }}
@@ -42,6 +45,13 @@ document.addEventListener("DOMContentLoaded", function () {
   const data = JSON.parse(document.getElementById("graph-data").textContent);
   const graph = window.RoleGraph.mount(document.getElementById("cy"));
   graph.setData(data);
+  // After a collection: same layout, filters and selection, fresh data.
+  document.addEventListener("rolelens:data-refreshed", function () {
+    fetch({{ url_for('role_graph', name=role.role_name) | tojson }}, { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (fresh) { if (fresh) graph.setData(fresh); })
+      .catch(function () {});
+  });
 });
 </script>
 {% endblock %}

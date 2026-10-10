@@ -12,9 +12,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 from typing import Any
 
-from .policy import is_aws_managed, principal_summary
+from .policy import is_aws_managed, principal_summary, role_account, trust_types
+
+# Service-linked roles always live under this path (iam:CreateServiceLinkedRole).
+SERVICE_LINKED_PATH = "/aws-service-role/"
 
 
 def latest_snapshot(conn: sqlite3.Connection, account_ref: int | None) -> sqlite3.Row | None:
@@ -36,8 +40,28 @@ def recent_snapshots(conn: sqlite3.Connection, account_ref: int, limit: int = 20
     return [{**dict(r), "warnings": json.loads(r["warnings"] or "[]")} for r in rows]
 
 
-def role_list(conn: sqlite3.Connection, snap_id: int, q: str = "") -> list[dict[str, Any]]:
-    """Rows of the Roles page; ``q`` matches name, path, ARN or a trust principal."""
+def days_since(value: str, now: datetime) -> int | None:
+    """Whole days between an ISO timestamp and ``now`` (None if empty or unparseable)."""
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return max(0, (now - ts).days)
+
+
+def role_list(
+    conn: sqlite3.Connection, snap_id: int, q: str = "", now: datetime | None = None
+) -> list[dict[str, Any]]:
+    """Rows of the Roles page; ``q`` matches name, path, ARN or a trust principal.
+
+    More filters (last used, trust type, flags, policy counts) are applied to these rows
+    by :class:`rolelens.filters.RoleFilters`.
+    """
+    now = now or datetime.now(UTC)
     counts = {
         (r["role_name"], r["kind"]): r["n"]
         for r in conn.execute(
@@ -51,7 +75,8 @@ def role_list(conn: sqlite3.Connection, snap_id: int, q: str = "") -> list[dict[
     for r in conn.execute(
         "SELECT * FROM roles WHERE snapshot_id=? ORDER BY role_name COLLATE NOCASE", (snap_id,)
     ):
-        principals = principal_summary(json.loads(r["trust_doc"] or "{}"))
+        trust = json.loads(r["trust_doc"] or "{}")
+        principals = principal_summary(trust)
         row = {
             "name": r["role_name"],
             "path": r["path"],
@@ -59,9 +84,13 @@ def role_list(conn: sqlite3.Connection, snap_id: int, q: str = "") -> list[dict[
             "description": r["description"],
             "last_used_at": r["last_used_at"],
             "last_used_region": r["last_used_region"],
+            "last_used_days": days_since(r["last_used_at"], now),
             "inline": counts.get((r["role_name"], "inline"), 0),
             "managed": counts.get((r["role_name"], "managed"), 0),
             "principals": principals,
+            "trust_types": trust_types(trust, role_account(r["arn"])),
+            "service_linked": r["path"].startswith(SERVICE_LINKED_PATH),
+            "boundary": r["permissions_boundary"],
         }
         row["policies"] = row["inline"] + row["managed"]
         haystack = " ".join([r["role_name"], r["path"], r["arn"], *principals]).lower()
