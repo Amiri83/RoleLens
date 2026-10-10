@@ -1,4 +1,5 @@
-"""A built-in catalog of IAM action names for the editor's validation.
+"""A built-in catalog of IAM action names for the editor's validation and the
+effective-permission expansion (:mod:`rolelens.effective`).
 
 Not exhaustive: it covers the services roles use most. An action of a service listed
 here must match a known action (wildcards included) or validation reports an error; an
@@ -47,12 +48,16 @@ CATALOG: dict[str, frozenset[str]] = {
     ),
     "iam": _names(
         """
-        AttachRolePolicy CreatePolicy CreatePolicyVersion CreateRole CreateServiceLinkedRole
-        DeletePolicy DeleteRole DeleteRolePolicy DetachRolePolicy GetAccountSummary GetPolicy
-        GetPolicyVersion GetRole GetRolePolicy GetUser ListAccountAliases
-        ListAttachedRolePolicies ListPolicies ListPolicyVersions ListRolePolicies ListRoles
-        ListRoleTags ListUsers PassRole PutRolePolicy SimulatePrincipalPolicy TagRole UntagRole
-        UpdateAssumeRolePolicy UpdateRole
+        AddUserToGroup AttachGroupPolicy AttachRolePolicy AttachUserPolicy CreateAccessKey
+        CreateLoginProfile CreatePolicy CreatePolicyVersion CreateRole CreateServiceLinkedRole
+        CreateUser DeletePolicy DeleteRole DeleteRolePermissionsBoundary DeleteRolePolicy
+        DetachRolePolicy GenerateServiceLastAccessedDetails GetAccountSummary GetPolicy
+        GetPolicyVersion GetRole GetRolePolicy GetServiceLastAccessedDetails GetUser
+        ListAccountAliases ListAttachedRolePolicies ListGroups ListPolicies ListPolicyVersions
+        ListRolePolicies ListRoles ListRoleTags ListUsers PassRole PutGroupPolicy
+        PutRolePermissionsBoundary PutRolePolicy PutUserPolicy SetDefaultPolicyVersion
+        SimulatePrincipalPolicy TagRole UntagRole UpdateAssumeRolePolicy UpdateLoginProfile
+        UpdateRole
         """
     ),
     "sts": _names(
@@ -224,3 +229,31 @@ def is_known_action(service: str, name: str) -> bool:
     if "*" in name or "?" in name:
         return bool(matching_actions(service, name))
     return name.lower() in _lower(service.lower())
+
+
+@cache
+def all_actions() -> frozenset[str]:
+    """Every catalog action as ``service:Action``."""
+    return frozenset(f"{svc}:{name}" for svc, names in CATALOG.items() for name in names)
+
+
+def expand_action(pattern: str) -> tuple[frozenset[str], bool]:
+    """The catalog actions an ``Action`` value grants, and whether it may grant more.
+
+    ``"*"`` and ``"s3:Get*"`` match catalog actions and possibly actions the catalog does
+    not list (``True``); so does an action of a service outside the catalog. A plain known
+    action (``"s3:GetObject"``) is exact (``False``). Matching is case-insensitive.
+    """
+    if pattern == "*":
+        return all_actions(), True
+    service, sep, name = pattern.partition(":")
+    if not sep:
+        return frozenset(), True
+    service = service.lower()
+    wild = any(c in pattern for c in "*?")
+    if any(c in service for c in "*?"):
+        services = [s for s in CATALOG if fnmatch.fnmatchcase(s, service)]
+    else:
+        services = [service] if service in CATALOG else []
+    found = frozenset(f"{s}:{a}" for s in services for a in matching_actions(s, name))
+    return found, wild or not found

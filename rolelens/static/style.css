@@ -94,6 +94,23 @@ table.roles tr.col-filters input.num { width: 4.2rem; font-size: 12px; padding: 
 .badge.trust-cross-account { background: var(--warn-bg); color: var(--warn-fg); }
 details.history > summary { cursor: pointer; font-weight: 600; }
 
+/* insights */
+.badge.sev-critical { background: var(--err-fg); color: #fff; font-weight: 600; }
+.badge.sev-high { background: var(--err-bg); color: var(--err-fg); }
+.badge.sev-medium { background: var(--warn-bg); color: var(--warn-fg); }
+.badge.sev-low { background: var(--badge-bg); color: var(--badge-fg); }
+a.badge { text-decoration: none; }
+.stat-row { display: flex; flex-wrap: wrap; gap: .8rem; margin-bottom: .5rem; }
+.stat { min-width: 9rem; margin-bottom: 0; padding: .7rem 1rem; }
+.stat-value { font-size: 22px; font-weight: 700; }
+.insight-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+@media (max-width: 1100px) { .insight-grid { grid-template-columns: 1fr; } }
+details.finding > summary { cursor: pointer; }
+details.finding p { margin: .5rem 0; }
+table.side-by-side td.d-only-a { background: var(--err-bg); }
+table.side-by-side td.d-only-b { background: var(--ok-bg); }
+input.num { width: 5rem; }
+
 /* graph */
 .graph-toolbar { align-items: center; gap: .6rem; margin-bottom: .5rem; }
 .graph-filters, .graph-export { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .2rem .6rem; }

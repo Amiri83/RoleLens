@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_macros.html" import graph_panel, graph_scripts with context %}
+{% from "_findings.html" import finding_list %}
 {% block title %}{{ role.role_name }}{% endblock %}
 {% block content %}
 <p><a href="{{ url_for('roles') }}" class="back-link">← Roles</a></p>
@@ -37,9 +38,81 @@
 <p class="muted">No policies attached.</p>
 {% endfor %}
 </div>
+
+{# Findings, usage and effective permissions (insights.py); re-fetched in place too. #}
+<div id="role-insights" data-refresh>
+<h2 id="findings">Risk findings ({{ info.findings | length }}){% if info.score %} <span class="muted small">score {{ info.score }}</span>{% endif %}</h2>
+{{ finding_list(info.findings) }}
+
+<h2 id="usage">Usage</h2>
+<p>Role last used: {% if role.last_used_at %}{{ role.last_used_at | localtime }}{% if role.last_used_region %} ({{ role.last_used_region }}){% endif %}{% else %}<span class="badge warn">never / unknown</span>{% endif %}</p>
+{% if not info.usage %}
+<p class="muted">No usage data for this snapshot: use <a href="{{ url_for('insights_page') }}">Insights → Collect usage data</a>.</p>
+{% else %}
+<p class="muted small">Usage data collected {{ info.usage.collected_at | localtime }} (window {{ info.usage.window_days }} days).</p>
+<h3>Services granted and last accessed</h3>
+{% if info.usage.status.get('access_advisor') != 'ok' %}
+<p class="muted">Service last accessed data: {{ info.usage.status.get('access_advisor', 'not collected') }}.</p>
+{% else %}
+{% if info.unused %}<p><span class="badge warn">{{ info.unused | length }} unused service{{ '' if info.unused | length == 1 else 's' }}</span>
+  {{ info.unused_actions }} effective action{{ '' if info.unused_actions == 1 else 's' }} not used in {{ window_days }} days</p>{% endif %}
+<table class="insights" id="service-access">
+  <thead><tr><th>Service</th><th>Last accessed</th><th>Region</th><th></th></tr></thead>
+  <tbody>
+  {% for s in info.services %}
+    <tr><td><span class="mono">{{ s.service }}</span> <span class="muted small">{{ s.name }}</span></td>
+      <td>{% if s.last_authenticated %}{{ s.last_authenticated | localtime }}{% else %}<span class="muted">never</span>{% endif %}</td>
+      <td class="small">{{ s.region }}</td>
+      <td>{% if s.unused %}<span class="badge warn">unused</span>{% endif %}</td></tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">The role's policies grant no service.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+<h3>Who assumes the role (CloudTrail, {{ info.usage.window_days }} days)</h3>
+{% if info.usage.status.get('cloudtrail') != 'ok' %}
+<p class="muted">CloudTrail data: {{ info.usage.status.get('cloudtrail', 'not collected') }}.</p>
+{% else %}
+<table class="insights" id="assume-events">
+  <thead><tr><th>Caller</th><th>Event</th><th>Source IP / service</th><th>Count</th><th>Last time</th></tr></thead>
+  <tbody>
+  {% for e in info.events %}
+    <tr><td><span class="mono small">{{ e.principal }}</span> <span class="muted small">{{ e.principal_type }}</span></td>
+      <td class="small">{{ e.event_name }}</td>
+      <td class="mono small">{{ e.source }}</td>
+      <td>{{ e.count }}{% if e.errors %} <span class="badge err">{{ e.errors }} failed</span>{% endif %}</td>
+      <td>{{ e.last_time | localtime }}</td></tr>
+  {% else %}
+    <tr><td colspan="5" class="muted">No AssumeRole events in the window.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+
+<h2 id="effective">Effective permissions ({{ info.actions | length }} action{{ '' if info.actions | length == 1 else 's' }})</h2>
+<p class="muted small">Union of every policy, wildcards expanded against the built-in action catalog (a wildcard is also
+  kept as-is: it can grant actions the catalog does not list). Unconditional Deny on "*" is subtracted; permissions
+  boundaries and narrower Deny statements are not evaluated.</p>
+<details class="card"><summary>{{ info.permissions | length }} grant{{ '' if info.permissions | length == 1 else 's' }} (action × resource × condition)</summary>
+<table class="insights" id="effective-permissions">
+  <thead><tr><th>Action</th><th>Resource</th><th>Condition</th><th>From</th></tr></thead>
+  <tbody>
+  {% for p in info.permissions %}
+    <tr><td class="mono small">{{ p.action }}</td><td class="mono small">{{ p.resource }}</td>
+      <td class="mono small">{{ p.condition }}</td><td class="small">{{ p.policies | join(', ') }}</td></tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">No permissions.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</details>
+</div>
 {% endblock %}
 {% block scripts %}
 {{ graph_scripts() }}
+<script src="{{ url_for('static', filename='copy.js') }}" defer></script>
 <script>
 document.addEventListener("DOMContentLoaded", function () {
   const data = JSON.parse(document.getElementById("graph-data").textContent);

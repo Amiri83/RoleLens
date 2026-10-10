@@ -1,8 +1,9 @@
 """Column filters of the Roles page, shared by the page and its Excel export.
 
-The filters travel as query parameters (``q``, ``used``, ``trust``, ``slr``, ``boundary``,
-``inline``, ``pmin``, ``pmax``), so the page, its no-JavaScript form, a bookmarked URL and
-``/roles.xlsx`` always agree on what "the current view" is. Unknown values are ignored.
+The filters travel as query parameters (``q``, ``used``, ``trust``, ``slr``,
+``boundary``, ``inline``, ``pmin``, ``pmax``, ``finding``), so the page, its no-JavaScript
+form, a bookmarked URL and ``/roles.xlsx`` always agree on what "the current view" is.
+Unknown values are ignored.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields
 from typing import Any
 
+from .findings import RULES
 from .policy import TRUST_TYPES
 
 LAST_USED = {
@@ -20,6 +22,8 @@ LAST_USED = {
     "180": "last used > 180 days ago",
 }
 YES_NO = {"yes": "yes", "no": "no"}
+# Risk finding filter: a rule id, "any" (at least one finding) or "none".
+FINDINGS = {"any": "any finding", "none": "no finding", **{k: r.title for k, r in RULES.items()}}
 MAX_POLICIES = 10_000
 MAX_QUERY = 200
 
@@ -50,6 +54,7 @@ class RoleFilters:
     inline: str = ""  # has inline policies: yes | no
     pmin: int | None = None  # number of policies (managed + inline), inclusive
     pmax: int | None = None
+    finding: str = ""  # FINDINGS key
 
     @classmethod
     def from_args(cls, args: Mapping[str, str]) -> RoleFilters:
@@ -62,6 +67,7 @@ class RoleFilters:
             inline=_choice(args.get("inline"), YES_NO),
             pmin=_count(args.get("pmin")),
             pmax=_count(args.get("pmax")),
+            finding=_choice(args.get("finding"), FINDINGS),
         )
 
     def matches(self, row: Mapping[str, Any]) -> bool:
@@ -84,7 +90,16 @@ class RoleFilters:
             return False
         if self.pmin is not None and row["policies"] < self.pmin:
             return False
-        return self.pmax is None or row["policies"] <= self.pmax
+        if self.pmax is not None and row["policies"] > self.pmax:
+            return False
+        if self.finding:
+            found = row.get("findings") or {}
+            if self.finding == "any":
+                return bool(found)
+            if self.finding == "none":
+                return not found
+            return self.finding in found
+        return True
 
     def apply(self, rows: Iterable[Mapping[str, Any]]) -> list[Any]:
         return [r for r in rows if self.matches(r)]
@@ -118,6 +133,8 @@ class RoleFilters:
             low = "0" if self.pmin is None else str(self.pmin)
             high = "any" if self.pmax is None else str(self.pmax)
             out.append(("Number of policies", f"{low} to {high}"))
+        if self.finding:
+            out.append(("Finding", FINDINGS[self.finding]))
         return out
 
     @property

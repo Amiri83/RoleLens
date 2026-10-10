@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Compare {{ a.role_name }} and {{ b.role_name }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('insights_recommendations') }}" class="back-link">← Recommendations</a></p>
+<h1>{{ a.role_name }} ↔ {{ b.role_name }}</h1>
+<p class="muted">Jaccard {{ '%.2f' | format(cmp.jaccard) }} ·
+  {{ {'subset': a.role_name ~ ' is a subset of ' ~ b.role_name, 'superset': a.role_name ~ ' is a superset of ' ~ b.role_name, 'equal': 'same actions', 'overlap': 'partial overlap'}[cmp.relation] }} ·
+  trust {{ 'identical' if cmp.same_trust else 'different' }}
+  {% if cmp.same_grants and cmp.same_trust %}· <span class="badge warn">duplicates</span>{% endif %}</p>
+
+<h2>Effective actions side by side</h2>
+<table class="insights side-by-side" id="side-by-side">
+  <thead><tr><th>Service</th><th>Only in {{ a.role_name }} ({{ cmp.counts.only_a }})</th><th>In both ({{ cmp.counts.common }})</th><th>Only in {{ b.role_name }} ({{ cmp.counts.only_b }})</th></tr></thead>
+  <tbody>
+  {% for s in cmp.services %}
+    <tr>
+      <td class="mono">{{ s.service }}</td>
+      <td class="d-only-a">{% for x in s.only_a %}<div class="mono small">{{ x }}</div>{% endfor %}</td>
+      <td class="d-common">{% if s.common | length > 8 %}<details><summary class="small">{{ s.common | length }} actions</summary>{% endif %}
+        {% for x in s.common %}<div class="mono small">{{ x }}</div>{% endfor %}
+        {% if s.common | length > 8 %}</details>{% endif %}</td>
+      <td class="d-only-b">{% for x in s.only_b %}<div class="mono small">{{ x }}</div>{% endfor %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">Neither role has permissions.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Suggested merged role: <span class="mono">{{ merged.role_name }}</span></h2>
+<p class="muted">Managed policies of both roles stay attached; the statements of all inline policies are combined into one
+  inline policy (duplicates dropped){% if not cmp.same_trust %}; the trust policy is the union of both{% endif %}.
+  Review it before use: RoleLens never writes to AWS.</p>
+{% if issues %}
+<div class="flash {{ 'error' if issues | selectattr('level', 'equalto', 'error') | list else 'warn' }}">
+  <ul>{% for i in issues %}<li><b>{{ i.where }}</b>{% if i.path %} <span class="mono">{{ i.path }}</span>{% endif %}: {{ i.message }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+<div class="row" style="margin-bottom: 1rem">
+  <form method="post" action="{{ url_for('insights_merge_draft', a=a.role_name, b=b.role_name) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" title="Edit the merged role in the draft editor (local only)">Open as draft</button>
+  </form>
+  <a class="btn secondary" href="{{ url_for('insights_merge_tf', a=a.role_name, b=b.role_name) }}">Download .tf</a>
+  <a class="btn secondary" href="{{ url_for('insights_merge_zip', a=a.role_name, b=b.role_name) }}">Download JSON (.zip)</a>
+</div>
+
+<section class="card export-block">
+  <div class="row" style="justify-content: space-between">
+    <h2 style="margin: 0">Policy JSON</h2>
+  </div>
+  {% for path, content in files.items() %}
+  <details class="json-file" {{ 'open' if 'merged-inline' in path }}>
+    <summary class="mono">{{ path }}</summary>
+    <div class="row"><button type="button" class="secondary" data-copy="#file-{{ loop.index }}">Copy</button></div>
+    <pre class="code" id="file-{{ loop.index }}">{{ content }}</pre>
+  </details>
+  {% endfor %}
+</section>
+
+<section class="card export-block">
+  <div class="row" style="justify-content: space-between">
+    <h2 style="margin: 0">Terraform (HCL)</h2>
+    <button type="button" class="secondary" data-copy="#hcl">Copy</button>
+  </div>
+  <pre class="code" id="hcl">{{ hcl }}</pre>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='copy.js') }}" defer></script>
+{% endblock %}

@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% from "_macros.html" import no_data with context %}
+{% from "_findings.html" import severity %}
+{% block title %}Insights{% endblock %}
+{% block content %}
+<div class="row" style="justify-content: space-between">
+  <h1>Insights</h1>
+  <div class="row">
+    <a class="btn secondary" href="{{ url_for('insights_recommendations') }}">Recommendations</a>
+    {% if snap %}
+    <form method="post" action="{{ url_for('usage_collect') }}" data-job="usage">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" title="Read-only and optional: iam:GenerateServiceLastAccessedDetails / GetServiceLastAccessedDetails, cloudtrail:LookupEvents, access-analyzer:ListAnalyzers / ListFindings">Collect usage data</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+{# Re-fetched in place after a collection or a usage job (refresh.js). #}
+<div id="insights-data" data-refresh>
+{% if not snap %}
+  {{ no_data() }}
+{% else %}
+<p class="muted">Computed locally from the collected policies: effective permissions (every policy of a role, wildcards
+  expanded against the built-in action catalog) and risk rules. Usage data is optional and read-only.</p>
+
+<div class="stat-row">
+  <div class="card stat"><div class="stat-value">{{ d.roles_with_findings }}<span class="muted small"> / {{ d.total_roles }}</span></div><div class="muted small">roles with findings</div></div>
+  {% for s, n in d.severities %}
+  <div class="card stat"><div class="stat-value">{{ n }}</div><div>{{ severity(s) }} <span class="muted small">findings</span></div></div>
+  {% endfor %}
+</div>
+
+<h2>Findings by type</h2>
+<table class="insights" id="rule-counts">
+  <thead><tr><th>Finding</th><th>Severity</th><th>Roles</th><th>Findings</th><th></th></tr></thead>
+  <tbody>
+  {% for r in d.rules %}
+    <tr>
+      <td><b>{{ r.title }}</b><div class="muted small">{{ r.summary }}</div></td>
+      <td>{% if r.findings %}{{ severity(r.severity) }}{% else %}<span class="muted">–</span>{% endif %}</td>
+      <td>{{ r.roles }}</td>
+      <td>{{ r.findings }}</td>
+      <td>{% if r.roles %}<a class="btn secondary" href="{{ url_for('roles', finding=r.rule) }}">Show roles</a>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<div class="insight-grid">
+  <section>
+    <h2>Top risky roles</h2>
+    <table class="insights" id="risky-roles">
+      <thead><tr><th>Role</th><th>Score</th><th>Worst</th><th>Findings</th></tr></thead>
+      <tbody>
+      {% for r in d.risky %}
+        <tr>
+          <td><a href="{{ url_for('role_page', name=r.role) }}#findings"><b>{{ r.role }}</b></a></td>
+          <td>{{ r.score }}</td>
+          <td>{{ severity(r.worst) }}</td>
+          <td class="small">{{ r.findings }} · {{ r.rules | join(', ') }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="4" class="muted">No findings.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted small">Score: critical 10, high 5, medium 2, low 1 per finding.</p>
+  </section>
+  <section>
+    <h2>Top unused permissions <span class="muted small">(not used in {{ window_days }} days)</span></h2>
+    {% if not d.usage or d.usage.status.get('access_advisor') != 'ok' %}
+      <p class="muted">Needs service last accessed data: <b>Collect usage data</b>.</p>
+    {% else %}
+    <table class="insights" id="top-unused">
+      <thead><tr><th>Service</th><th>Roles granting it unused</th><th>Unused actions</th></tr></thead>
+      <tbody>
+      {% for s in d.top_unused %}
+        <tr><td><span class="mono">{{ s.service }}</span> <span class="muted small">{{ s.name }}</span></td>
+          <td>{{ s.roles | length }} <span class="muted small">{{ s.roles[:5] | join(', ') }}{% if s.roles | length > 5 %}, …{% endif %}</span></td>
+          <td>{{ s.actions }}</td></tr>
+      {% else %}
+        <tr><td colspan="3" class="muted">Every granted service was used.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <h3>Roles with the most unused permissions</h3>
+    <table class="insights" id="unused-roles">
+      <thead><tr><th>Role</th><th>Unused services</th><th>Unused actions</th></tr></thead>
+      <tbody>
+      {% for r in d.unused_roles %}
+        <tr><td><a href="{{ url_for('role_page', name=r.role) }}#usage">{{ r.role }}</a></td><td>{{ r.services }}</td><td>{{ r.actions }}</td></tr>
+      {% else %}
+        <tr><td colspan="3" class="muted">None.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+</div>
+
+<h2>Usage data</h2>
+{% if d.usage %}
+<div class="card">
+  <p class="muted small">Collected {{ d.usage.collected_at | localtime }} · window {{ d.usage.window_days }} days</p>
+  <ul class="small" id="usage-sources">
+    {% for label, status in d.usage.sources %}
+    <li>{{ label }}: <span class="badge {{ 'ok' if status == 'ok' else 'warn' }}">{{ status }}</span></li>
+    {% endfor %}
+  </ul>
+  {% if d.usage.warnings %}<details><summary>{{ d.usage.warnings | length }} warning(s)</summary>
+    <ul class="small">{% for w in d.usage.warnings %}<li>{{ w }}</li>{% endfor %}</ul></details>{% endif %}
+</div>
+{% else %}
+<p class="muted">No usage data for this snapshot yet. <b>Collect usage data</b> reads service last accessed reports,
+  CloudTrail AssumeRole events ({{ window_days }} days) and Access Analyzer findings; each source is optional.</p>
+{% endif %}
+
+{% if d.usage and d.usage.status.get('access_analyzer') == 'ok' %}
+<h2>IAM Access Analyzer findings ({{ d.analyzer | length }})</h2>
+<table class="insights" id="analyzer-findings">
+  <thead><tr><th>Resource</th><th>Type</th><th>Finding</th><th>Detail</th><th>Updated</th></tr></thead>
+  <tbody>
+  {% for a in d.analyzer %}
+    <tr>
+      <td>{% if a.role %}<a href="{{ url_for('role_page', name=a.role) }}">{{ a.role }}</a>{% else %}<span class="mono small">{{ a.resource }}</span>{% endif %}</td>
+      <td class="small">{{ a.resource_type }}</td>
+      <td>{{ a.finding_type }} <span class="muted small">{{ a.analyzer }}</span></td>
+      <td class="small">{{ a.detail }}</td>
+      <td>{{ a.updated_at | localtime }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="muted">No active findings.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% elif d.usage and d.usage.status.get('access_analyzer') == 'no analyzer' %}
+<p class="muted small">IAM Access Analyzer: no analyzer in this region.</p>
+{% endif %}
+{% endif %}
+</div>
+{% endblock %}

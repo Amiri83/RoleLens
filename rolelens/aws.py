@@ -3,14 +3,16 @@
 Every client created through :class:`AwsGateway` has a botocore ``before-call``
 hook that rejects any API operation whose name does not start with ``List`` or
 ``Get`` (``Describe`` too, for completeness), and a few ``Get`` calls that return
-secret values or credentials. RoleLens never mutates AWS: drafts and exports are
-local only.
+secret values or credentials. The only other operations allowed are the read-only
+reports of :data:`EXTRA_READ_ONLY_OPERATIONS` (usage data). RoleLens never mutates
+AWS: drafts and exports are local only.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
 import boto3
@@ -53,9 +55,22 @@ SECRET_VALUE_OPERATIONS = frozenset(
 )
 
 
+# Read-only operations whose names carry no read-only prefix, allowed by exact name:
+# GenerateServiceLastAccessedDetails only starts a report job (read back with
+# GetServiceLastAccessedDetails); LookupEvents reads the CloudTrail event history.
+EXTRA_READ_ONLY_OPERATIONS = frozenset(
+    {
+        ("iam", "GenerateServiceLastAccessedDetails"),
+        ("cloudtrail", "LookupEvents"),
+    }
+)
+
+
 def is_read_only_operation(service: str, op_name: str) -> bool:
     if (service, op_name) in SECRET_VALUE_OPERATIONS:
         return False
+    if (service, op_name) in EXTRA_READ_ONLY_OPERATIONS:
+        return True
     return op_name.startswith(READ_ONLY_PREFIXES)
 
 
@@ -64,6 +79,21 @@ def _guard_read_only(model: Any = None, **_: Any) -> None:
     service = getattr(getattr(model, "service_model", None), "service_name", "")
     if not is_read_only_operation(service, op_name):
         raise ReadOnlyViolation(f"RoleLens is read-only; refusing AWS operation {op_name!r}")
+
+
+def error_code(exc: Exception) -> str:
+    """The AWS error code of a failed call (the exception type for other errors)."""
+    if isinstance(exc, ClientError):
+        return exc.response.get("Error", {}).get("Code", "") or "ClientError"
+    return type(exc).__name__
+
+
+def iso_time(value: Any) -> str:
+    """A boto3 timestamp as ISO UTC (``""`` for None)."""
+    if isinstance(value, datetime):
+        ts = value if value.tzinfo else value.replace(tzinfo=UTC)
+        return ts.astimezone(UTC).isoformat(timespec="seconds")
+    return str(value or "")
 
 
 def is_credential_failure(exc: BaseException) -> bool:

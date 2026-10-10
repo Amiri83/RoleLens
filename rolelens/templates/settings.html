@@ -56,6 +56,11 @@
   <h2 style="margin-top: 0">Logging</h2>
   <label for="log_dir">Log directory</label>
   <input id="log_dir" name="log_dir" value="{{ s.log_dir }}" size="60" class="mono" placeholder="{{ default_log_dir }}">
+  <h2>Recommendations</h2>
+  <label for="overlap_threshold">Overlap threshold (Jaccard similarity, 0.5 to 1)</label>
+  <input id="overlap_threshold" name="overlap_threshold" type="number" min="0.5" max="1" step="0.05" value="{{ s.overlap_threshold }}">
+  <p class="muted small">Two roles are reported as overlapping when their effective action sets share at least this
+    fraction of their union.</p>
   <p><button type="submit">Save</button></p>
 </form>
 
@@ -64,6 +69,9 @@
   <span class="mono">List*</span> / <span class="mono">Get*</span>. Minimal IAM permissions:
   <span class="mono">iam:ListRoles, iam:GetRole, iam:ListAttachedRolePolicies, iam:ListRolePolicies,
   iam:GetRolePolicy, iam:GetPolicy, iam:GetPolicyVersion</span> (and <span class="mono">sts:GetCallerIdentity</span>,
-  which needs no permission). Drafts and exports stay on this machine.
+  which needs no permission). Optional usage data (Insights) also uses the read-only reports
+  <span class="mono">iam:GenerateServiceLastAccessedDetails, iam:GetServiceLastAccessedDetails,
+  cloudtrail:LookupEvents, access-analyzer:ListAnalyzers, access-analyzer:ListFindings</span>, allowed by exact
+  name. Drafts and exports stay on this machine.
 </div>
 {% endblock %}

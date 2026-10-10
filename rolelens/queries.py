@@ -15,6 +15,7 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
+from .findings import SEVERITIES
 from .policy import is_aws_managed, principal_summary, role_account, trust_types
 
 # Service-linked roles always live under this path (iam:CreateServiceLinkedRole).
@@ -58,8 +59,10 @@ def role_list(
 ) -> list[dict[str, Any]]:
     """Rows of the Roles page; ``q`` matches name, path, ARN or a trust principal.
 
-    More filters (last used, trust type, flags, policy counts) are applied to these rows
-    by :class:`rolelens.filters.RoleFilters`.
+    More filters (last used, trust type, flags, policy counts, findings) are applied to
+    these rows by :class:`rolelens.filters.RoleFilters`. ``findings`` maps each risk rule
+    of the role to its worst severity (empty until the snapshot is analysed, see
+    :func:`rolelens.insights.ensure_analysis`); ``severity`` is the worst of them.
     """
     now = now or datetime.now(UTC)
     counts = {
@@ -70,6 +73,11 @@ def role_list(
             (snap_id,),
         )
     }
+    findings: dict[str, list[tuple[str, str]]] = {}
+    for f in conn.execute(
+        "SELECT role_name, rule, severity FROM role_findings WHERE snapshot_id=?", (snap_id,)
+    ):
+        findings.setdefault(f["role_name"], []).append((f["rule"], f["severity"]))
     needle = q.strip().lower()
     out = []
     for r in conn.execute(
@@ -92,6 +100,13 @@ def role_list(
             "service_linked": r["path"].startswith(SERVICE_LINKED_PATH),
             "boundary": r["permissions_boundary"],
         }
+        found = findings.get(r["role_name"], [])
+        # rule -> worst severity, worst first (see rolelens.findings)
+        by_rule: dict[str, str] = {}
+        for rule, sev in sorted(found, key=lambda x: SEVERITIES.index(x[1])):
+            by_rule.setdefault(rule, sev)
+        row["findings"] = by_rule
+        row["severity"] = next(iter(by_rule.values()), "")
         row["policies"] = row["inline"] + row["managed"]
         haystack = " ".join([r["role_name"], r["path"], r["arn"], *principals]).lower()
         if needle and needle not in haystack:

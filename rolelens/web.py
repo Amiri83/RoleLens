@@ -1,4 +1,5 @@
-"""Flask application: accounts, IAM collection, roles, graph, draft editor, export, logs."""
+"""Flask application: accounts, IAM collection, roles, graph, insights, draft editor, export,
+logs."""
 
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ from markupsafe import Markup
 
 from . import drafts as drafts_mod
 from . import export as export_mod
-from . import graph_export, queries
+from . import graph_export, insights, queries, recommend
 from .accounts import (
     AUTH_MODE_LABELS,
     AUTH_MODES,
@@ -45,13 +46,14 @@ from .collector import Collector
 from .config import AppPaths, default_paths
 from .crypto import SecretBox
 from .db import closing, connect, init_db
-from .filters import LAST_USED, RoleFilters
+from .filters import FINDINGS, LAST_USED, RoleFilters
 from .graph import build_graph
 from .jobs import KINDS as JOB_KINDS
 from .jobs import JobBusy, JobCancelled, JobContext, JobFailed, JobManager, Progress
 from .logging_setup import LEVELS, configure_logging, read_log
 from .policy import TRUST_TYPES, dumps
 from .settings import MAX_DISPLAY_NAME, REGIONS, Settings, SettingsStore
+from .usage import WINDOW_DAYS, UsageCollector
 from .validate import has_errors, validate_model
 from .xlsx import roles_workbook
 
@@ -262,6 +264,15 @@ def _snapshot_or_none():
     return g.snapshot
 
 
+def _analysed_snapshot():
+    """Like :func:`_snapshot_or_none`, with the snapshot's insights analysis guaranteed."""
+    snap = _snapshot_or_none()
+    if snap is not None and "analysed" not in g:
+        insights.ensure_analysis(_paths().db_path, snap["id"])
+        g.analysed = True
+    return snap
+
+
 def account_choice_label(acct: Account) -> str:
     """Selector label: the display name, else the AWS account id seen last."""
     return acct.display_name or acct.aws_account_id or f"Account {acct.id}"
@@ -351,6 +362,8 @@ def _register(app: Flask) -> None:
     def _filtered_roles(snap) -> tuple[RoleFilters, list[dict[str, Any]], int]:
         """The column filters of the request and the rows they keep (page and export)."""
         filters = RoleFilters.from_args(request.args)
+        if snap is not None:
+            _analysed_snapshot()
         rows = queries.role_list(_db(), snap["id"]) if snap else []
         return filters, filters.apply(rows), len(rows)
 
@@ -368,6 +381,7 @@ def _register(app: Flask) -> None:
             f=filters,
             last_used_choices=LAST_USED,
             trust_choices=TRUST_TYPES,
+            finding_choices=FINDINGS,
             history=history,
         )
 
@@ -378,14 +392,19 @@ def _register(app: Flask) -> None:
         if snap is None:
             abort(404, NO_DATA)
         filters, rows, total = _filtered_roles(snap)
+        by_role = insights.findings_by_role(_db(), snap["id"])
+        findings = [f for r in rows for f in by_role.get(r["name"], [])]
         data = roles_workbook(
             rows,
             filters,
             account=account_label(snap["account_id"], snap["account_name"]),
             taken_at=snap["taken_at"],
             total=total,
+            findings=findings,
         )
-        log.info("roles exported to Excel (%d of %d rows)", len(rows), total)
+        log.info(
+            "roles exported to Excel (%d of %d rows, %d findings)", len(rows), total, len(findings)
+        )
         stamp = (utc_iso(snap["taken_at"]) or "")[:10]
         return _download(data, f"rolelens-roles-{stamp}.xlsx", XLSX_MIMETYPE)
 
@@ -401,12 +420,15 @@ def _register(app: Flask) -> None:
     @app.get("/roles/<name>")
     def role_page(name: str):
         model = _role_or_404(name)
+        snap = _analysed_snapshot()
         return render_template(
             "role.html",
             role=model,
             graph=build_graph(model),
             layouts=LAYOUTS,
             dumps=dumps,
+            info=insights.role_insights(_db(), snap["id"], name),
+            window_days=WINDOW_DAYS,
         )
 
     @app.get("/roles/<name>/graph.json")
@@ -553,6 +575,152 @@ def _register(app: Flask) -> None:
         log.info("snapshot %s deleted", snap_id)
         flash("Snapshot deleted (drafts cloned from it are kept).", "ok")
         return redirect(url_for("roles"))
+
+    # -- insights --------------------------------------------------------------------
+
+    @app.get("/insights")
+    def insights_page():
+        snap = _analysed_snapshot()
+        return render_template(
+            "insights.html",
+            snap=snap,
+            d=insights.dashboard(_db(), snap["id"]) if snap else None,
+            window_days=WINDOW_DAYS,
+        )
+
+    @app.post("/insights/usage")
+    def usage_collect():
+        active = _active()
+        snap = _snapshot_or_none()
+        if active is None or snap is None:
+            error = "Collect the IAM roles of an account first."
+            if _wants_background():
+                return jsonify({"ok": False, "error": error}), 400
+            flash(error, "error")
+            return redirect(url_for("insights_page"))
+        work = _usage_work(active.id, snap["id"])
+        return _run_job(active.id, "usage", work, url_for("insights_page"))
+
+    def _usage_work(account_id: int, snap_id: int) -> Callable[[JobContext], None]:
+        """The usage job of a snapshot (service last accessed, CloudTrail, Access Analyzer);
+        like the collection job, everything is resolved before the worker starts."""
+        account = _accounts().get(account_id, with_secret=True)
+        if account is None:
+            raise ValueError(f"unknown account {account_id}")
+        factory = _ext()["gateway_factory"]
+        db_path = _paths().db_path
+        edit_url = url_for("account_edit", account_id=account.id)
+
+        def work(ctx: JobContext) -> None:
+            try:
+                result = UsageCollector(factory(account), db_path, snap_id, progress=ctx).run()
+            except (JobCancelled, JobFailed):
+                raise
+            except Exception as exc:
+                log.exception("usage collection failed (account=%s)", account.id)
+                if is_credential_failure(exc):
+                    _credential_message(ctx, "Usage collection failed", exc, edit_url)
+                else:
+                    ctx.message("error", "Usage collection failed. See the log for details.")
+                raise JobFailed("Usage collection failed") from None
+            ctx.message(
+                "ok",
+                f"Usage collected: {result.services} service entries, {result.events} "
+                f"AssumeRole events, {result.analyzer_findings} Access Analyzer findings",
+            )
+            for w in result.warnings[:20]:
+                ctx.message("warn", w)
+            if len(result.warnings) > 20:
+                ctx.message("warn", f"… and {len(result.warnings) - 20} more warnings (see Logs)")
+
+        return work
+
+    @app.get("/insights/recommendations")
+    def insights_recommendations():
+        snap = _analysed_snapshot()
+        default = _store().load().overlap_threshold
+        threshold = recommend.parse_threshold(request.args.get("threshold"), default)
+        dups: list[list[str]] = []
+        pairs: list[dict[str, Any]] = []
+        if snap is not None:
+            perms = insights.role_perms(_db(), snap["id"])
+            dups = recommend.duplicates(perms)
+            pairs = recommend.overlaps(perms, threshold)
+        return render_template(
+            "recommendations.html",
+            snap=snap,
+            duplicates=dups,
+            overlaps=pairs,
+            threshold=threshold,
+            default_threshold=default,
+            limit=recommend.MAX_OVERLAPS,
+        )
+
+    def _pair_or_404() -> tuple[dict[str, Any], dict[str, Any], Any, Any]:
+        """Role models and permission sets of the ``a`` / ``b`` query parameters."""
+        snap = _analysed_snapshot()
+        if snap is None:
+            abort(404, NO_DATA)
+        name_a, name_b = request.args.get("a", ""), request.args.get("b", "")
+        if name_a == name_b:
+            abort(400, "pick two different roles")
+        a = queries.role_model(_db(), snap["id"], name_a)
+        b = queries.role_model(_db(), snap["id"], name_b)
+        if a is None or b is None:
+            abort(404)
+        perms = {p.name: p for p in insights.role_perms(_db(), snap["id"])}
+        empty = recommend.RolePerms("", frozenset(), frozenset(), "")
+        return a, b, perms.get(name_a, empty), perms.get(name_b, empty)
+
+    def _merge_header(a: dict[str, Any], b: dict[str, Any]) -> str:
+        return (
+            f"Generated by RoleLens: suggested merge of roles {a['role_name']} and "
+            f"{b['role_name']}.\nReview it and run terraform plan yourself: RoleLens never "
+            "writes to AWS."
+        )
+
+    @app.get("/insights/compare")
+    def insights_compare():
+        a, b, perms_a, perms_b = _pair_or_404()
+        merged = recommend.merged_model(a, b)
+        return render_template(
+            "compare.html",
+            a=a,
+            b=b,
+            cmp=recommend.compare(perms_a, perms_b),
+            merged=merged,
+            issues=[i.as_dict() for i in validate_model(merged)],
+            hcl=export_mod.terraform(merged, _merge_header(a, b)),
+            files=export_mod.json_files(merged),
+        )
+
+    @app.get("/insights/merge.tf")
+    def insights_merge_tf():
+        a, b, _pa, _pb = _pair_or_404()
+        merged = recommend.merged_model(a, b)
+        body = export_mod.terraform(merged, _merge_header(a, b))
+        name = export_mod.identifier(merged["role_name"], set())
+        return _download(body.encode(), f"{name}.tf", "text/plain")
+
+    @app.get("/insights/merge.zip")
+    def insights_merge_zip():
+        a, b, _pa, _pb = _pair_or_404()
+        merged = recommend.merged_model(a, b)
+        name = export_mod.identifier(merged["role_name"], set())
+        data = export_mod.zip_bytes(export_mod.json_files(merged), name)
+        return _download(data, f"{name}-policies.zip", "application/zip")
+
+    @app.post("/insights/merge/draft")
+    def insights_merge_draft():
+        a, b, _pa, _pb = _pair_or_404()
+        snap = _snapshot_or_none()
+        with closing(_paths().db_path) as conn:
+            draft_id = drafts_mod.create(
+                conn, _active_ref(), snap["id"], a["role_name"], a, recommend.merged_model(a, b)
+            )
+        log.info("draft %s created from a merge of two roles (snapshot=%s)", draft_id, snap["id"])
+        flash("Merged draft created. It is local only: RoleLens never writes to AWS.", "ok")
+        return redirect(url_for("draft_edit", draft_id=draft_id))
 
     # -- drafts ----------------------------------------------------------------------
 
@@ -741,9 +909,19 @@ def _register(app: Flask) -> None:
 
     @app.post("/settings")
     def settings_save():
-        _store().save(log_dir=request.form.get("log_dir", ""))
-        new_dir = apply_log_dir(current_app, _store().load())
-        log.info("settings saved: log_dir=%s", new_dir)
+        try:
+            _store().save(
+                log_dir=request.form.get("log_dir", ""),
+                overlap_threshold=request.form.get("overlap_threshold"),
+            )
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("settings_page"))
+        settings = _store().load()
+        new_dir = apply_log_dir(current_app, settings)
+        log.info(
+            "settings saved: log_dir=%s overlap_threshold=%s", new_dir, settings.overlap_threshold
+        )
         flash("Settings saved", "ok")
         return redirect(url_for("settings_page"))
 

@@ -11,12 +11,13 @@ import boto3
 import pytest
 from moto import mock_aws
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 from rolelens.aws import AwsGateway
 from rolelens.db import closing
 from rolelens.filters import RoleFilters
 from rolelens.web import create_app, host_allowed
-from rolelens.xlsx import HEADERS, roles_workbook
+from rolelens.xlsx import FINDING_HEADERS, HEADERS, roles_workbook
 
 from .conftest import INLINE_A, seed_iam
 from .test_graph_export import view_payload
@@ -319,11 +320,17 @@ def test_roles_excel_export_of_the_filtered_view(client):
     assert (row["Managed policies"], row["Inline policies"], row["Policies"]) == (1, 1, 2)
     assert row["Service-linked"] == "no" and row["Last used (UTC)"] is None
     assert ws.freeze_panes == "A2"
-    assert ws.auto_filter.ref == f"A1:N{len(rows)}"
+    assert ws.auto_filter.ref == f"A1:{get_column_letter(len(HEADERS))}{len(rows)}"
     assert all(c.font.bold for c in ws[1])
+    assert row["Highest severity"] == "low"
+    assert row["Findings"] == "No permissions boundary (low)"
+    findings = list(wb["Findings"].iter_rows(values_only=True))
+    assert list(findings[0]) == FINDING_HEADERS
+    assert [(f[0], f[1], f[3]) for f in findings[1:]] == [("role-a", "low", "no-boundary")]
     info = {r[0]: r[1] for r in wb["Export"].iter_rows(values_only=True)}
     assert info["Account"] == "example (123456789012)"
     assert info["Roles"] == "1 of 2"
+    assert info["Findings"] == 1
     assert info["Trust type"] == "service" and info["Inline policies"] == "yes"
 
     everything = load_workbook(io.BytesIO(client.get("/roles.xlsx").data))
@@ -331,7 +338,7 @@ def test_roles_excel_export_of_the_filtered_view(client):
         "role-a",
         "role-b",
     ]
-    assert everything["Export"]["B5"].value == "none"  # Filters: none
+    assert everything["Export"]["B6"].value == "none"  # Filters: none
 
 
 def test_roles_excel_export_without_data(client):

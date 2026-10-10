@@ -1,4 +1,4 @@
-"""Background jobs: IAM collection.
+"""Background jobs: IAM collection and usage data collection.
 
 At most **one job per account** runs at a time. A job is a plain function run in a
 worker thread with a :class:`JobContext`; it reports its current step, done / total
@@ -42,10 +42,11 @@ RUNNING, DONE, CANCELLED, ERROR = "running", "done", "cancelled", "error"
 STATES = (RUNNING, DONE, CANCELLED, ERROR)
 KINDS = {
     "collect": "Collect IAM roles",
+    "usage": "Collect usage data",
 }
 # Kinds whose run changes what the pages show (a collection writes a snapshot, even when it
 # fails or is cancelled): after one ends, the page re-fetches its data (jobs.js).
-DATA_KINDS = frozenset({"collect"})
+DATA_KINDS = frozenset({"collect", "usage"})
 LOG_TAIL = 200  # log lines kept per job
 MAX_LOG_LINE = 240
 MAX_STEP = 200
