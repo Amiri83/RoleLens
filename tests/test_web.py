@@ -96,6 +96,31 @@ def test_untrusted_host_header_is_rejected(home):
     assert c.get("/", headers={"Host": "127.0.0.1:8078"}).status_code == 200
 
 
+@pytest.mark.parametrize(
+    "host, ok",
+    [
+        ("192.0.2.10:8078", True),  # --allow-remote: an IP address is no rebinding vector
+        ("[2001:db8::10]:8078", True),
+        ("localhost:8078", True),
+        ("192.0.2.10:9999", False),  # the port still has to match
+        ("[2001:db8::10]", False),
+        ("attacker.example:8078", False),
+        ("192.0.2.10.attacker.example:8078", False),
+    ],
+)
+def test_host_allowed_with_ip_literals(host, ok):
+    assert host_allowed(host, 8078, ip_literals=True) is ok
+    if ok and not host.startswith("localhost"):
+        assert host_allowed(host, 8078) is False  # local-only by default
+
+
+def test_ip_host_header_is_served_only_when_remote_is_allowed(home):
+    for allow in (False, True):
+        app = create_app(home, testing=True, port=8078, allow_remote=allow)
+        resp = app.test_client().get("/", headers={"Host": "192.0.2.10:8078"})
+        assert (resp.status_code == 400) is not allow
+
+
 def test_post_without_csrf_token_is_rejected(client):
     assert client.post("/collect", data={}).status_code == 400
     assert client.post("/accounts/new", data={"auth_mode": "env"}).status_code == 400

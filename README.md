@@ -91,8 +91,14 @@ python3 -m venv .venv
 ```
 
 Options: `--port`, `--host` (default `127.0.0.1`, local only), `--home` (data directory,
-default `$ROLELENS_HOME` or `~/.rolelens`). Set `ROLELENS_SECRET_KEY` to supply the Fernet key
-instead of the generated `secret.key` file.
+default `$ROLELENS_HOME` or `~/.rolelens`), `--no-browser` (do not open the browser), `--debug`
+(Flask development server with the debugger; development only). Set `ROLELENS_SECRET_KEY` to
+supply the Fernet key instead of the generated `secret.key` file.
+
+RoleLens is served by [waitress](https://docs.pylonsproject.org/projects/waitress/) and prints one
+line with its URL, data directory and log file. With a desktop session the UI opens in the web
+browser; otherwise open the printed URL. Ctrl+C (or SIGTERM) stops it cleanly: running jobs are
+cancelled.
 
 ### Minimal IAM permissions
 
@@ -114,6 +120,9 @@ none). Optional, for usage data: `iam:GenerateServiceLastAccessedDetails`,
   tokens) and never part of an error message.
 - Only `127.0.0.1` / `localhost` Host headers are served (DNS rebinding); every POST needs the
   session's CSRF token; the session cookie is `SameSite=Strict`.
+- A non-loopback `--host` is refused unless `--allow-remote` is passed. RoleLens has **no
+  authentication**, so it then prints a warning and also accepts IP-address Host headers
+  (hostnames other than `localhost` stay rejected as DNS-rebinding protection).
 - All front-end assets are vendored: the browser makes no external requests.
 
 ## Development
