@@ -28,6 +28,7 @@ dependencies = [
     "flask>=3.0",
     "boto3>=1.34",
     "cryptography>=42",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -71,4 +72,5 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "SIM"]
 ignore = ["S101"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S105", "S106"]
+# S314: tests parse the SVG / draw.io XML that RoleLens itself generated.
+"tests/*" = ["S105", "S106", "S314"]

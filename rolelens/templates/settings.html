@@ -9,7 +9,7 @@
   <a class="btn" href="{{ url_for('account_new') }}">Add account</a>
 </div>
 <p class="muted">Roles, graphs and drafts always belong to the <b>active</b> account (selector in the top bar).</p>
-<table class="accounts">
+<table class="accounts" id="accounts-table" data-refresh>
   <thead><tr><th>Account</th><th>Region</th><th>Auth</th><th>Credentials</th><th></th></tr></thead>
   <tbody>
   {% for c in accounts %}

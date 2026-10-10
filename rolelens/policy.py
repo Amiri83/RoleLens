@@ -8,6 +8,14 @@ import urllib.parse
 from typing import Any
 
 PRINCIPAL_TYPES = ("AWS", "Service", "Federated", "CanonicalUser")
+# Who can assume a role (Roles page column and filter), see trust_types().
+TRUST_TYPES = {
+    "service": "service",
+    "account": "same account",
+    "cross-account": "cross-account",
+    "oidc": "OIDC",
+    "saml": "SAML",
+}
 _ACCOUNT_RX = re.compile(r"^\d{12}$")
 _IAM_ARN_RX = re.compile(r"^arn:aws[\w-]*:iam::(\d{12}|aws):(.+)$")
 _STS_ARN_RX = re.compile(r"^arn:aws[\w-]*:sts::(\d{12}):(.+)$")
@@ -113,6 +121,46 @@ def split_action(action: str) -> tuple[str, str]:
     if not sep:
         return "", action
     return service.lower(), name
+
+
+def principal_account(ident: str) -> str | None:
+    """AWS account id named by an ``AWS`` principal (None for ``*`` or unique ids)."""
+    if _ACCOUNT_RX.match(ident):
+        return ident
+    m = _IAM_ARN_RX.match(ident) or _STS_ARN_RX.match(ident)
+    return m.group(1) if m and m.group(1) != "aws" else None
+
+
+def role_account(arn: str) -> str | None:
+    """Account id of a role ARN (``arn:aws:iam::123456789012:role/role-a``)."""
+    m = _IAM_ARN_RX.match(arn or "")
+    return m.group(1) if m and m.group(1) != "aws" else None
+
+
+def trust_types(trust: Any, own_account: str | None) -> list[str]:
+    """Kinds of principals a trust policy allows, in :data:`TRUST_TYPES` order.
+
+    ``AWS`` principals of ``own_account`` are ``account``; any other ``AWS`` principal
+    (another account, ``*``, or an id that names no account) is ``cross-account``.
+    ``Federated`` principals are ``saml`` (a SAML provider or ``sts:AssumeRoleWithSAML``),
+    else ``oidc`` (web identity).
+    """
+    found: set[str] = set()
+    for p in trust_principals(trust):
+        if p["effect"] != "Allow" or p["negated"]:
+            continue
+        if p["type"] == "Service":
+            found.add("service")
+        elif p["type"] == "Federated":
+            saml = ":saml-provider/" in p["id"] or any(
+                a.lower() == "sts:assumerolewithsaml" for a in p["actions"]
+            )
+            found.add("saml" if saml else "oidc")
+        else:
+            account = principal_account(p["id"]) if p["type"] == "AWS" else None
+            same = account is not None and account == own_account
+            found.add("account" if same else "cross-account")
+    return [t for t in TRUST_TYPES if t in found]
 
 
 def principal_summary(trust: Any) -> list[str]:

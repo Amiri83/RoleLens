@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% from "_macros.html" import no_data with context %}
 {% block title %}Roles{% endblock %}
+{% macro choice(name, label, options, value) -%}
+  <select name="{{ name }}" form="role-filters" aria-label="{{ label }}" title="{{ label }}">
+    <option value="">{{ label }}: any</option>
+    {% for key, text in options.items() %}<option value="{{ key }}" {{ 'selected' if key == value }}>{{ text }}</option>{% endfor %}
+  </select>
+{%- endmacro %}
 {% block content %}
 <div class="row" style="justify-content: space-between">
   <h1>IAM roles</h1>
@@ -11,29 +17,56 @@
   </form>
   {% endif %}
 </div>
+{# Re-fetched in place after a collection (refresh.js); the filters re-fetch only
+   #roles-summary and #roles-tbody, so the filter being typed in keeps its focus. #}
+<div id="roles-data" data-refresh>
 {% if not snap %}
   {{ no_data() }}
 {% else %}
-<form method="get" class="row search-row" role="search">
-  <label for="q" class="sr-only">Search roles</label>
-  <input id="q" name="q" type="search" value="{{ q }}" size="40" placeholder="name, path, ARN or trusted principal"
-         autocomplete="off" data-filter="#roles-table">
-  <button type="submit" class="secondary">Search</button>
-  <span class="muted small"><span id="role-count">{{ rows | length }}</span> role{{ '' if rows | length == 1 else 's' }}</span>
+<form id="role-filters" method="get" action="{{ url_for('roles') }}" class="row search-row" role="search">
+  <div id="roles-summary" class="row roles-summary">
+    <span class="muted small" id="role-count">
+      {%- if f.active %}{{ rows | length }} of {{ total }} roles match the filters
+      {%- else %}{{ total }} role{{ '' if total == 1 else 's' }}{% endif %}</span>
+    <a class="btn secondary" id="roles-xlsx" href="{{ url_for('roles_xlsx', **f.query()) }}"
+       title="Download the roles shown below (current filters) as an Excel workbook">Export to Excel</a>
+    {% if f.active %}<a href="{{ url_for('roles') }}" class="small">Clear filters</a>{% endif %}
+  </div>
+  <button type="submit" class="secondary" id="filters-apply">Apply filters</button>
 </form>
 <table id="roles-table" class="roles">
-  <thead><tr><th>Role</th><th>Path</th><th>Last used</th><th>Policies</th><th>Trusted principals</th><th></th></tr></thead>
-  <tbody>
+  <thead>
+    <tr><th>Role</th><th>Path</th><th>Last used</th><th>Trust</th><th>Flags</th><th>Policies</th><th></th></tr>
+    <tr class="col-filters">
+      <td colspan="2"><input name="q" form="role-filters" type="search" value="{{ f.q }}" placeholder="name, path, ARN or trusted principal"
+          autocomplete="off" aria-label="Filter by name, path, ARN or trusted principal"></td>
+      <td>{{ choice('used', 'Last used', last_used_choices, f.used) }}</td>
+      <td>{{ choice('trust', 'Trust', trust_choices, f.trust) }}</td>
+      <td>{{ choice('slr', 'Service-linked', {'yes': 'service-linked', 'no': 'not service-linked'}, f.slr) }}
+          {{ choice('boundary', 'Boundary', {'yes': 'has boundary', 'no': 'no boundary'}, f.boundary) }}</td>
+      <td><span class="nowrap"><input name="pmin" form="role-filters" type="number" min="0" value="{{ f.pmin if f.pmin is not none else '' }}"
+            placeholder="min" aria-label="Minimum number of policies" class="num">–<input name="pmax" form="role-filters" type="number" min="0"
+            value="{{ f.pmax if f.pmax is not none else '' }}" placeholder="max" aria-label="Maximum number of policies" class="num"></span>
+          {{ choice('inline', 'Inline', {'yes': 'has inline', 'no': 'no inline'}, f.inline) }}</td>
+      <td></td>
+    </tr>
+  </thead>
+  <tbody id="roles-tbody">
   {% for r in rows %}
-    <tr data-search="{{ (r.name ~ ' ' ~ r.path ~ ' ' ~ r.arn ~ ' ' ~ (r.principals | join(' '))) | lower }}">
+    <tr>
       <td><a href="{{ url_for('role_page', name=r.name) }}"><b>{{ r.name }}</b></a>
         {% if r.description %}<div class="muted small">{{ r.description }}</div>{% endif %}</td>
       <td class="mono">{{ r.path }}</td>
       <td>{% if r.last_used_at %}{{ r.last_used_at | localtime }}{% if r.last_used_region %} <span class="muted small">{{ r.last_used_region }}</span>{% endif %}
+          {% if r.last_used_days is not none %}<div class="muted small">{{ r.last_used_days }} day{{ '' if r.last_used_days == 1 else 's' }} ago</div>{% endif %}
           {% else %}<span class="badge warn">never / unknown</span>{% endif %}</td>
+      <td>{% for t in r.trust_types %}<span class="badge trust-{{ t }}">{{ trust_choices[t] }}</span> {% endfor %}
+        <div>{% for p in r.principals %}<span class="tag">{{ p }}</span> {% else %}<span class="muted">none</span>{% endfor %}</div></td>
+      <td>{% if r.service_linked %}<span class="badge">service-linked</span> {% endif %}
+        {% if r.boundary %}<span class="badge" title="{{ r.boundary }}">boundary</span>{% endif %}
+        {% if not r.service_linked and not r.boundary %}<span class="muted">–</span>{% endif %}</td>
       <td title="{{ r.managed }} managed · {{ r.inline }} inline">{{ r.policies }}
         <span class="muted small">({{ r.managed }} managed, {{ r.inline }} inline)</span></td>
-      <td>{% for p in r.principals %}<span class="tag">{{ p }}</span> {% else %}<span class="muted">none</span>{% endfor %}</td>
       <td style="white-space: nowrap">
         <a class="btn secondary" href="{{ url_for('role_page', name=r.name) }}">Graph</a>
         <form class="inline" method="post" action="{{ url_for('role_clone', name=r.name) }}">
@@ -43,7 +76,7 @@
       </td>
     </tr>
   {% else %}
-    <tr><td colspan="6" class="muted">No role matches.</td></tr>
+    <tr><td colspan="7" class="muted">No role matches{% if f.active %} the filters — <a href="{{ url_for('roles') }}">clear them</a>{% endif %}.</td></tr>
   {% endfor %}
   </tbody>
 </table>
@@ -76,26 +109,8 @@
   </table>
 </details>
 {% endif %}
+</div>
 {% endblock %}
 {% block scripts %}
-<script>
-// Instant filter as you type (the Search button filters server-side without JavaScript).
-(function () {
-  "use strict";
-  const input = document.querySelector("input[data-filter]");
-  if (!input) return;
-  const rows = document.querySelectorAll(input.dataset.filter + " tbody tr[data-search]");
-  const count = document.getElementById("role-count");
-  input.addEventListener("input", () => {
-    const needle = input.value.trim().toLowerCase();
-    let shown = 0;
-    rows.forEach((tr) => {
-      const hit = !needle || tr.dataset.search.includes(needle);
-      tr.hidden = !hit;
-      if (hit) shown += 1;
-    });
-    count.textContent = shown;
-  });
-})();
-</script>
+<script src="{{ url_for('static', filename='roles.js') }}" defer></script>
 {% endblock %}

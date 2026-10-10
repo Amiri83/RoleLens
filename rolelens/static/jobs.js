@@ -1,10 +1,13 @@
 /* RoleLens background jobs: IAM collection.
    Forms marked data-job are posted with background=1; the server starts the job (one per
    account) and this script polls its state into the modal: current step, done / total,
-   elapsed time, the live log tail and a Cancel button. A reload re-attaches to the
-   account's running job; a job started from this tab and finished while the page was
-   reloading is shown once more with its result. Without JavaScript the forms post
-   normally and the job runs to the end before the page is redrawn. */
+   elapsed time, the live log tail, Cancel (while running) and Close. Close on a running
+   job only hides the modal (a badge follows the job; when it ends, its result is shown).
+   Closing a finished job that changed data (changes_data, e.g. a collection) re-fetches
+   the page's data in place (refresh.js) instead of reloading the page. A reload
+   re-attaches to the account's running job; a job started from this tab and finished
+   while the page was reloading is shown once more with its result. Without JavaScript
+   the forms post normally and the job runs to the end before the page is redrawn. */
 (function () {
   "use strict";
 
@@ -22,11 +25,12 @@
   const messages = $("job-messages");
   const logEl = $("job-log");
   const cancelBtn = $("job-cancel");
-  const hideBtn = $("job-hide");
   const closeBtn = $("job-close");
   const badge = $("job-badge");
   const csrf = modal.dataset.csrf;
   let jobId = null;
+  let lastJob = null;
+  let refreshedFor = null;  // id of the finished job whose data was re-fetched
   let timer = null;
   let running = false;
 
@@ -58,7 +62,9 @@
   }
 
   function render(job) {
+    const wasRunning = running;
     running = Boolean(job.running);
+    lastJob = job;
     title.textContent = job.label + (running ? "…" : "");
     stepEl.textContent = job.step || "";
     bar.max = Math.max(job.total || 0, 1);
@@ -73,12 +79,12 @@
     renderMessages(job.messages);
     cancelBtn.hidden = !running;
     cancelBtn.disabled = Boolean(job.cancel_requested);
-    hideBtn.hidden = !running;
-    closeBtn.hidden = running;
+    closeBtn.title = running ? "Keep it running in the background" : "";
     badge.textContent = running ? `${job.label}: ${job.step} (${job.done}/${job.total || "?"})` : "";
     if (!running) {
       badge.hidden = true;
       sessionStorage.removeItem(WATCH_KEY);
+      if (wasRunning && modal.hidden) open();  // the job ran hidden: show its result
     }
   }
 
@@ -87,9 +93,16 @@
     badge.hidden = true;
   }
 
-  function hide() {
+  function close() {
     modal.hidden = true;
     badge.hidden = !running;
+    const job = lastJob;
+    if (running || !job || !job.changes_data || refreshedFor === job.id) return;
+    refreshedFor = job.id;
+    if (!window.rolelensRefresh) { window.location.reload(); return; }
+    window.rolelensRefresh.regions().catch((err) => {
+      if (err.name !== "AbortError") window.location.reload();  // e.g. the role is gone
+    });
   }
 
   function poll() {
@@ -113,7 +126,7 @@
   function attach(job, show) {
     jobId = job.id;
     render(job);
-    if (show) open(); else hide();
+    if (show) open(); else close();
     if (job.running) timer = setTimeout(poll, POLL_MS);
   }
 
@@ -127,11 +140,10 @@
     cancelBtn.disabled = true;
     post(url(modal.dataset.cancelUrl, jobId), {}).then(poll).catch(poll);
   });
-  hideBtn.addEventListener("click", hide);
+  closeBtn.addEventListener("click", close);
   badge.addEventListener("click", open);
-  closeBtn.addEventListener("click", () => window.location.reload());
   document.addEventListener("keydown", (evt) => {
-    if (evt.key === "Escape" && !modal.hidden && running) hide();
+    if (evt.key === "Escape" && !modal.hidden) close();
   });
 
   // Forms that start a job: posted in the background, followed in the modal.
@@ -154,14 +166,13 @@
             return;
           }
           jobId = null;
+          lastJob = null;
           title.textContent = "Not started";
           stepEl.textContent = "";
           logEl.textContent = "";
           renderMessages([{ category: "error", text: d.error || `HTTP ${status}` }]);
           running = false;
           cancelBtn.hidden = true;
-          hideBtn.hidden = true;
-          closeBtn.hidden = false;
           open();
         })
         .catch((err) => {

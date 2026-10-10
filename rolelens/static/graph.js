@@ -3,9 +3,15 @@
    rolelens/graph.py. Allow edges are green, Deny edges red and thicker, statements with a
    Condition are dashed; nodes reached by both Allow and Deny are "mixed". Grid is the
    default layout; the choice is remembered in localStorage. Clicking a node shows its
-   detail (the statements behind it) in the side panel.
+   detail (the statements behind it) in the side panel. Each node carries its type icon
+   (served by the page as data: URIs, #graph-icons).
 
-   window.RoleGraph.mount(container) -> { setData(graph), cy } */
+   Filters (node types, Allow / Deny) hide elements and re-run the layout on what is left.
+   Exports show exactly what is on screen: PNG is cytoscape's own rendering, SVG and
+   draw.io are rendered by the server from exportView() (the visible nodes and edges with
+   their positions, sizes and faded state) — see rolelens/graph_export.py.
+
+   window.RoleGraph.mount(container) -> { setData(graph), exportView(), cy } */
 (function () {
   "use strict";
 
@@ -15,18 +21,34 @@
     allow: "#2f8f4e", deny: "#c0392b", mixed: "#c27c0e", neutral: "#8a94a3",
     role: "#2457c5", line: "#5b6573",
   };
+  const ICON_SPACE = 16;  // room left of the label for the 12px type icon
 
   // Node size from its label (approximate text metrics; labels wrap at 150px).
   const textWidth = (n) => String(n.data("label") || "").length * 6.4;
-  const nodeWidth = (n) => Math.max(36, Math.min(150, textWidth(n))) + 8;
+  const nodeWidth = (n) => Math.max(36, Math.min(150, textWidth(n))) + 8 + ICON_SPACE;
   const nodeHeight = (n) => 14 * Math.max(1, Math.ceil(textWidth(n) / 150)) + 8;
+
+  function readIcons() {
+    const el = document.getElementById("graph-icons");
+    try { return el ? JSON.parse(el.textContent) : {}; } catch (_err) { return {}; }
+  }
+
+  function iconStyles(icons) {
+    return Object.entries(icons).map(([type, uri]) => ({
+      selector: `node.${type}`,
+      style: { "background-image": uri },
+    }));
+  }
 
   const STYLE = [
     { selector: "node", style: {
       "label": "data(label)", "font-size": 11, "color": "#1f2933",
       "text-valign": "center", "text-halign": "center", "text-wrap": "wrap", "text-max-width": 150,
+      "text-margin-x": ICON_SPACE / 2 - 1,
       "width": nodeWidth, "height": nodeHeight, "padding": "8px", "shape": "round-rectangle",
       "background-color": "#fff", "border-width": 2, "border-color": COLORS.line,
+      "background-width": 12, "background-height": 12, "background-fit": "none", "background-clip": "none",
+      "background-position-x": 5, "background-position-y": "50%", "background-image-containment": "over",
     } },
     { selector: "node.principal", style: { "background-color": "#e8edf3", "shape": "round-rectangle" } },
     { selector: "node.role", style: {
@@ -54,6 +76,7 @@
     } },
     { selector: "edge.conditional", style: { "line-style": "dashed" } },
     { selector: ".faded", style: { "opacity": 0.15 } },
+    { selector: ".hidden", style: { "display": "none" } },
   ];
 
   function rank(n) { return RANK[n.data("type")] ?? 9; }
@@ -62,13 +85,14 @@
     return rank(a) - rank(b) || String(a.data("label")).localeCompare(String(b.data("label")));
   }
 
-  function layoutOptions(cy, name) {
+  // Layouts run on the visible elements only (eles), so filtering compacts the graph.
+  function layoutOptions(eles, name) {
     const common = { fit: true, padding: 30, animate: false };
     switch (name) {
       case "breadthfirst": {
-        const roots = cy.nodes(".principal");
+        const roots = eles.nodes(".principal");
         return { ...common, name, directed: true, spacingFactor: 1.1,
-                 roots: roots.length ? roots : cy.nodes(".role") };
+                 roots: roots.length ? roots : eles.nodes(".role") };
       }
       case "concentric":
         return { ...common, name, concentric: (n) => 10 - Math.abs(rank(n) - 1) * 2, levelWidth: () => 2,
@@ -76,7 +100,7 @@
       case "circle":
         return { ...common, name, sort: byRank };
       default: {
-        const n = cy.nodes().length;
+        const n = eles.nodes().length;
         return { ...common, name: "grid", sort: byRank, avoidOverlap: true, avoidOverlapPadding: 16,
                  cols: Math.max(1, Math.ceil(Math.sqrt(n * 1.6))) };
       }
@@ -84,17 +108,19 @@
   }
 
   // Left-to-right dagre layout, applied through cytoscape's preset layout.
-  function dagreLayout(cy) {
+  function dagreLayout(eles) {
     const g = new dagre.graphlib.Graph({ multigraph: true });
     g.setGraph({ rankdir: "LR", nodesep: 14, ranksep: 70, marginx: 10, marginy: 10 });
     g.setDefaultEdgeLabel(() => ({}));
-    cy.nodes().forEach((n) => {
+    const nodes = eles.nodes();
+    nodes.forEach((n) => {
       const dim = n.layoutDimensions({ nodeDimensionsIncludeLabels: true });
       g.setNode(n.id(), { width: dim.w, height: dim.h });
     });
-    cy.edges().forEach((e) => g.setEdge(e.source().id(), e.target().id(), {}, e.id()));
+    eles.edges().filter((e) => nodes.contains(e.source()) && nodes.contains(e.target()))
+      .forEach((e) => g.setEdge(e.source().id(), e.target().id(), {}, e.id()));
     dagre.layout(g);
-    cy.layout({
+    nodes.layout({
       name: "preset", fit: true, padding: 30, animate: false,
       positions: (n) => { const p = g.node(n.id()); return { x: p.x, y: p.y }; },
     }).run();
@@ -131,23 +157,108 @@
     }
   }
 
+  function download(blob, filename) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }
+
   function mount(container) {
     const panel = document.getElementById("node-detail");
     const select = document.getElementById("layout");
     const stats = document.getElementById("graph-stats");
     const fitBtn = document.getElementById("graph-fit");
+    const effectSel = document.getElementById("graph-effect");
+    const typeBoxes = [...document.querySelectorAll("input[data-show]")];
+    const exportState = document.getElementById("graph-export-state");
     if (typeof window.cytoscape !== "function") {
       container.textContent = "The graph library (static/vendor/cytoscape.min.js) is missing.";
-      return { setData() {}, cy: null };
+      return { setData() {}, exportView() { return null; }, cy: null };
     }
-    const cy = window.cytoscape({ container, style: STYLE, wheelSensitivity: 0.3, minZoom: 0.1, maxZoom: 3 });
+    const style = STYLE.concat(iconStyles(readIcons()));
+    const cy = window.cytoscape({ container, style, wheelSensitivity: 0.3, minZoom: 0.1, maxZoom: 3 });
     const saved = localStorage.getItem(LAYOUT_KEY);
     if (select && saved && [...select.options].some((o) => o.value === saved)) select.value = saved;
 
     function run() {
       const name = select ? select.value : "grid";
-      if (name === "dagre" && window.dagre) dagreLayout(cy);
-      else cy.layout(layoutOptions(cy, name)).run();
+      const eles = cy.elements().not(".hidden");
+      if (name === "dagre" && window.dagre) dagreLayout(eles);
+      else eles.layout(layoutOptions(eles, name)).run();
+    }
+
+    // Node types left unticked are hidden (the role always stays). With an effect filter,
+    // edges of the other effect are hidden, then every node (other than the role and its
+    // policies) left without a shown edge.
+    function applyFilters() {
+      const shown = new Set(typeBoxes.filter((b) => b.checked).map((b) => b.dataset.show));
+      const effect = effectSel ? effectSel.value : "";
+      cy.batch(() => {
+        cy.elements().removeClass("hidden");
+        cy.nodes().forEach((n) => {
+          const type = n.data("type");
+          if (type !== "role" && typeBoxes.length && !shown.has(type)) n.addClass("hidden");
+        });
+        if (!effect) return;
+        cy.edges().forEach((e) => {
+          const ef = e.data("effect");
+          if (ef !== "Attached" && ef !== effect) e.addClass("hidden");
+        });
+        cy.nodes().forEach((n) => {
+          const type = n.data("type");
+          if (type === "role" || type === "policy") return;
+          if (n.connectedEdges().every((e) => e.hasClass("hidden"))) n.addClass("hidden");
+        });
+      });
+    }
+
+    // What is on screen, for the server-side SVG / draw.io renderers.
+    function exportView() {
+      const role = cy.nodes(".role");
+      const nodes = cy.nodes().filter((n) => n.visible()).map((n) => ({
+        id: n.id(), label: n.data("label"), type: n.data("type"), effect: n.data("effect"),
+        x: n.position("x"), y: n.position("y"), w: n.outerWidth(), h: n.outerHeight(),
+        faded: n.hasClass("faded"),
+      }));
+      const edges = cy.edges().filter((e) => e.visible() && e.source().visible() && e.target().visible())
+        .map((e) => ({
+          id: e.id(), source: e.source().id(), target: e.target().id(), effect: e.data("effect"),
+          conditional: Boolean(e.data("conditional")), label: e.data("label") || "",
+          faded: e.hasClass("faded"),
+        }));
+      const name = (role.nonempty() && role.data("label")) || container.dataset.exportName || "role";
+      return { name, nodes, edges };
+    }
+
+    function exportAs(fmt) {
+      const view = exportView();
+      const base = String(view.name).replace(/[^A-Za-z0-9_.-]+/g, "-") || "role";
+      if (!view.nodes.length) { exportState.textContent = "nothing visible to export"; return; }
+      exportState.textContent = "exporting…";
+      if (fmt === "png") {
+        download(cy.png({ output: "blob", full: true, scale: 2, bg: "#ffffff" }), `${base}-graph.png`);
+        exportState.textContent = "";
+        return;
+      }
+      const body = new URLSearchParams({ csrf_token: container.dataset.csrf, view: JSON.stringify(view) });
+      fetch(container.dataset.exportUrl.replace("__FMT__", fmt), { method: "POST", body, credentials: "same-origin" })
+        .then((r) => {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          const disposition = r.headers.get("Content-Disposition") || "";
+          const m = disposition.match(/filename="([^"]+)"/);
+          return r.blob().then((blob) => download(blob, m ? m[1] : `${base}-graph.${fmt}`));
+        })
+        .then(() => { exportState.textContent = ""; })
+        .catch((err) => { exportState.textContent = `export failed (${err.message})`; });
+    }
+
+    function refilter() {
+      applyFilters();
+      run();
     }
 
     function highlight(node) {
@@ -160,16 +271,23 @@
     cy.on("tap", "node", (evt) => { renderDetail(panel, evt.target); highlight(evt.target); });
     cy.on("tap", (evt) => { if (evt.target === cy) { renderDetail(panel, null); highlight(null); } });
     if (select) select.addEventListener("change", () => { localStorage.setItem(LAYOUT_KEY, select.value); run(); });
-    if (fitBtn) fitBtn.addEventListener("click", () => cy.fit(undefined, 30));
+    if (fitBtn) fitBtn.addEventListener("click", () => cy.fit(cy.elements().not(".hidden"), 30));
+    typeBoxes.forEach((b) => b.addEventListener("change", refilter));
+    if (effectSel) effectSel.addEventListener("change", refilter);
+    document.querySelectorAll("button[data-export]").forEach((b) => {
+      b.addEventListener("click", () => exportAs(b.dataset.export));
+    });
 
     return {
       cy,
+      exportView,
       setData(graph) {
         const selected = cy.$("node:selected").map((n) => n.id());
         cy.batch(() => {
           cy.elements().remove();
           cy.add(graph.elements || []);
         });
+        applyFilters();
         run();
         const again = selected.length ? cy.getElementById(selected[0]) : null;
         if (again && again.nonempty()) { again.select(); renderDetail(panel, again); highlight(again); }

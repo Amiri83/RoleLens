@@ -84,11 +84,21 @@ pre.json, pre.code { background: var(--bg); border: 1px solid var(--line); borde
 
 /* roles */
 .search-row { align-items: center; margin-bottom: .6rem; }
+.roles-summary { align-items: center; gap: .6rem; }
 table.roles td .tag { margin-right: .2rem; }
+table.roles tr.col-filters td { background: var(--bg); padding: .3rem .4rem; }
+table.roles tr.col-filters input[type="search"] { width: 100%; min-width: 14rem; }
+table.roles tr.col-filters select { max-width: 11rem; font-size: 12px; padding: .2rem .3rem; margin: 1px 0; }
+table.roles tr.col-filters input.num { width: 4.2rem; font-size: 12px; padding: .2rem .3rem; }
+.nowrap { white-space: nowrap; }
+.badge.trust-cross-account { background: var(--warn-bg); color: var(--warn-fg); }
 details.history > summary { cursor: pointer; font-weight: 600; }
 
 /* graph */
 .graph-toolbar { align-items: center; gap: .6rem; margin-bottom: .5rem; }
+.graph-filters, .graph-export { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .2rem .6rem; }
+.graph-filters label.check { font-weight: 400; font-size: 12px; }
+.graph-export button { padding: .25rem .6rem; font-size: 12px; }
 .legend { display: inline-flex; flex-wrap: wrap; gap: .2rem .9rem; font-size: 12px; }
 .legend span { display: inline-flex; align-items: center; gap: .3rem; }
 .legend .sw { display: inline-block; width: 24px; height: 0; border-top: 3px solid; }

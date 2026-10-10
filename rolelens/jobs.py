@@ -43,6 +43,9 @@ STATES = (RUNNING, DONE, CANCELLED, ERROR)
 KINDS = {
     "collect": "Collect IAM roles",
 }
+# Kinds whose run changes what the pages show (a collection writes a snapshot, even when it
+# fails or is cancelled): after one ends, the page re-fetches its data (jobs.js).
+DATA_KINDS = frozenset({"collect"})
 LOG_TAIL = 200  # log lines kept per job
 MAX_LOG_LINE = 240
 MAX_STEP = 200
@@ -124,6 +127,7 @@ class Job:
             "id": self.id,
             "account_ref": self.account_ref,
             "kind": self.kind,
+            "changes_data": self.kind in DATA_KINDS,
             "label": self.label,
             "state": self.state,
             "running": self.state == RUNNING,
@@ -324,6 +328,7 @@ class JobManager:
             "id": row["id"],
             "account_ref": row["account_ref"],
             "kind": row["kind"],
+            "changes_data": row["kind"] in DATA_KINDS,
             "label": row["label"],
             "state": row["state"],
             "running": False,  # a stored job is never running in this process

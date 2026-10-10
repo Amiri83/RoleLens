@@ -12,14 +12,35 @@
   {% endif %}
 {%- endmacro %}
 
-{# The role graph: toolbar, canvas and the click-for-detail side panel (graph.js). #}
-{% macro graph_panel(layouts, elements_id) -%}
+{# The role graph: toolbar (layout, filters, export), canvas and the click-for-detail side
+   panel (graph.js). Exports show the graph as it is on screen: layout, filters, selection. #}
+{% macro graph_panel(layouts, elements_id, export_name) -%}
   <div class="row graph-toolbar">
     <label for="layout" class="inline-label">Layout</label>
     <select id="layout">
       {% for key, label in layouts.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
     </select>
     <button type="button" class="secondary" id="graph-fit">Fit</button>
+    <span class="graph-filters" role="group" aria-label="Node types shown">
+      {% for t, label in [('principal', 'principals'), ('policy', 'policies'), ('service', 'services'), ('action', 'actions'), ('resource', 'resources')] %}
+      <label class="inline-label check"><input type="checkbox" data-show="{{ t }}" checked> {{ label }}</label>
+      {% endfor %}
+    </span>
+    <label for="graph-effect" class="inline-label">Effect</label>
+    <select id="graph-effect">
+      <option value="">Allow + Deny</option>
+      <option value="Allow">Allow only</option>
+      <option value="Deny">Deny only</option>
+    </select>
+    <span class="graph-export" role="group" aria-label="Export the graph as shown">
+      <span class="muted small">Export</span>
+      <button type="button" class="secondary" data-export="svg" title="SVG with embedded icons">SVG</button>
+      <button type="button" class="secondary" data-export="png">PNG</button>
+      <button type="button" class="secondary" data-export="drawio" title="draw.io diagram (AWS service shapes)">draw.io</button>
+      <span class="muted small" id="graph-export-state" aria-live="polite"></span>
+    </span>
+  </div>
+  <div class="row graph-toolbar">
     <span class="legend">
       <span><i class="sw allow"></i>Allow</span>
       <span><i class="sw deny"></i>Deny</span>
@@ -29,7 +50,9 @@
     <span class="muted small" id="graph-stats"></span>
   </div>
   <div class="graph-main">
-    <div id="cy" class="card" data-elements="{{ elements_id }}" role="img" aria-label="Role graph"></div>
+    <div id="cy" class="card" data-elements="{{ elements_id }}" role="img" aria-label="Role graph"
+         data-export-url="{{ url_for('graph_export_file', fmt='__FMT__') }}"
+         data-export-name="{{ export_name }}" data-csrf="{{ csrf_token }}"></div>
     <aside class="card node-detail" id="node-detail" aria-live="polite">
       <h2>Detail</h2>
       <p class="muted">Click a node to see the statements behind it.</p>
@@ -38,6 +61,7 @@
 {%- endmacro %}
 
 {% macro graph_scripts() -%}
+  <script type="application/json" id="graph-icons">{{ graph_icons | tojson }}</script>
   <script src="{{ url_for('static', filename='vendor/cytoscape.min.js') }}" defer></script>
   <script src="{{ url_for('static', filename='vendor/dagre.min.js') }}" defer></script>
   <script src="{{ url_for('static', filename='graph.js') }}" defer></script>
