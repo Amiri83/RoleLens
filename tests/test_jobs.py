@@ -83,3 +83,25 @@ def test_unknown_kind_is_refused(db_path):
             mgr.start(1, "write-to-aws", lambda ctx: None)
     finally:
         mgr.close()
+
+
+def test_shutdown_cancels_running_jobs_and_waits(db_path):
+    mgr = jobs.JobManager(db_path)
+    started = threading.Event()
+
+    def work(ctx: jobs.JobContext) -> None:
+        started.set()
+        while not ctx.cancelled:  # a cooperative job: stops at its next check
+            threading.Event().wait(0.01)
+        ctx.check()
+
+    try:
+        job = mgr.start(1, "collect", work)
+        finished = mgr.start(2, "usage", lambda ctx: None, background=False)
+        assert started.wait(WAIT)
+        assert mgr.shutdown(WAIT) == [job["id"]]  # the finished job is left alone
+        assert mgr.status(job["id"])["state"] == jobs.CANCELLED
+        assert mgr.status(finished["id"])["state"] == jobs.DONE
+        assert mgr.shutdown(WAIT) == []
+    finally:
+        mgr.close()

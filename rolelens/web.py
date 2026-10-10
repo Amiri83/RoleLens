@@ -3,6 +3,7 @@ logs."""
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -81,14 +82,30 @@ GRAPH_FORMATS: dict[str, tuple[str, Callable[[graph_export.View], str]]] = {
 }
 
 
-def host_allowed(host: str, port: int | None) -> bool:
+def _ip_literal(name: str) -> bool:
+    try:
+        ipaddress.ip_address(name.removeprefix("[").removesuffix("]"))
+    except ValueError:
+        return False
+    return True
+
+
+def host_allowed(host: str, port: int | None, *, ip_literals: bool = False) -> bool:
     """True if ``host`` (a raw Host header) names this local server.
 
     With a known ``port`` the header must carry exactly that port (a bare name
     is only valid for port 80). With ``port=None`` any numeric port is accepted.
+    ``ip_literals`` (``rolelens --allow-remote``) also accepts any IP address as the
+    name: DNS rebinding always arrives under a hostname, never an IP literal.
     """
-    name, sep, host_port = host.strip().lower().partition(":")
-    if name not in ALLOWED_HOSTS:
+    host = host.strip().lower()
+    if host.startswith("["):  # [IPv6]:port
+        name, _, rest = host.partition("]")
+        name += "]"
+        sep, host_port = (":", rest[1:]) if rest.startswith(":") else ("", rest)
+    else:
+        name, sep, host_port = host.partition(":")
+    if name not in ALLOWED_HOSTS and not (ip_literals and _ip_literal(name)):
         return False
     if port is None:
         return not sep or host_port.isdigit()
@@ -150,9 +167,12 @@ def create_app(
     gateway_factory: GatewayFactory | None = None,
     testing: bool = False,
     port: int | None = None,
+    allow_remote: bool = False,
 ) -> Flask:
     """Build the app. ``port`` is the port the server listens on; when given,
-    the Host header must be ``127.0.0.1:<port>`` or ``localhost:<port>``."""
+    the Host header must be ``127.0.0.1:<port>`` or ``localhost:<port>``.
+    ``allow_remote`` (``rolelens --allow-remote``) also accepts IP-address Host headers
+    (see :func:`host_allowed`)."""
     paths = default_paths(home).ensure()
     init_db(paths.db_path)
     box = SecretBox.from_path(paths.key_path)
@@ -174,6 +194,7 @@ def create_app(
         "accounts": account_store,
         "gateway_factory": gateway_factory or AwsGateway.from_account,
         "port": port,
+        "allow_remote": allow_remote,
         # Background jobs (IAM collection): one per account.
         "jobs": JobManager(paths.db_path),
     }
@@ -181,6 +202,13 @@ def create_app(
     log.info("RoleLens started (data dir %s)", paths.home)
     _register(app)
     return app
+
+
+def shutdown_app(app: Flask, timeout: float = 10.0) -> None:
+    """Stop the app's background work (server shutdown): running jobs are cancelled and
+    waited for up to ``timeout`` seconds."""
+    cancelled = app.extensions["rolelens"]["jobs"].shutdown(timeout)
+    log.info("RoleLens stopped (%d job(s) cancelled)", len(cancelled))
 
 
 def _ext() -> dict[str, Any]:
@@ -324,7 +352,7 @@ def _register(app: Flask) -> None:
     def _trusted_host() -> None:
         # Raw header: werkzeug's request.host drops default ports.
         host = request.headers.get("Host", "")
-        if not host_allowed(host, _ext()["port"]):
+        if not host_allowed(host, _ext()["port"], ip_literals=_ext()["allow_remote"]):
             log.warning(
                 "rejected request %s with untrusted Host header %r", request.path, host[:100]
             )
