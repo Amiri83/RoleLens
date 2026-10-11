@@ -90,8 +90,12 @@ redacting log file and Host / CSRF guards.
   **PNG** (rendered by cytoscape) and **draw.io** (`.drawio` mxfile; AWS service nodes use the
   `mxgraph.aws4` service shapes).
 - **Background jobs**: a progress modal with Cancel and Close (Close on a running job keeps it
-  going in the background). When a collection ends, closing the modal re-fetches the page's
+  going in the background, minimized to a badge). The modal / badge is app-wide: it stays on
+  every tab while the job runs and, once it ends, until its result is dismissed; clicking the
+  badge brings the modal back. When a collection ends, closing the modal re-fetches the page's
   data in place — no full page reload.
+- Without `iam:ListUsers`, users seen as group members or policy attachments are still listed
+  on the Users page (marked "not listed", metadata unknown).
 - **Draft editor**: clone a role, edit role settings, the trust policy and the inline / customer
   managed policies in a JSON editor (line numbers, error line marker, indentation, format);
   add or remove policies (AWS managed policies are read-only: detach only). Validation covers

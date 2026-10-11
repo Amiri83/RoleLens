@@ -8,15 +8,18 @@ import json
 import zipfile
 from urllib.parse import quote
 
+import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 from openpyxl import load_workbook
 
 from rolelens import export
+from rolelens.web import create_app
 from rolelens.xlsx import POLICY_HEADERS, USER_HEADERS
 
 from .conftest import ADMIN_DOC, POLICY_A, seed_iam, seed_identities
-from .test_web import _add_account, _draft_id, _post, app, client  # noqa: F401 - fixtures
+from .test_web import _add_account, _draft_id, _gateway, _post, app, client  # noqa: F401
 
 POLICY_ARN = "arn:aws:iam::123456789012:policy/policy-a"
 UNUSED_ARN = "arn:aws:iam::123456789012:policy/policy-unused"
@@ -68,6 +71,55 @@ def test_users_page_and_filters(client, collected):  # noqa: F811
     assert 'href="/users/user-admin"' in page and 'href="/users/user-b"' not in page
     # the export link carries the filters
     assert 'href="/users.xlsx?finding=admin"' in page
+
+
+@mock_aws
+def test_users_tab_lists_users_collected_without_list_users(home):
+    """Regression: with iam:ListUsers denied, a collection (background job) stored the users
+    as group members and policy attachments, shown on the Groups and Policies tabs, but the
+    Users tab was empty."""
+
+    def gateway(_acct):
+        gw = _gateway()
+        real_client = gw.client
+
+        def iam_client(service, **kw):
+            c = real_client(service, **kw)
+            if service == "iam":
+                real_paginator = c.get_paginator
+
+                def get_paginator(op):
+                    if op == "list_users":
+                        raise ClientError({"Error": {"Code": "AccessDenied", "Message": "x"}}, op)
+                    return real_paginator(op)
+
+                c.get_paginator = get_paginator
+            return c
+
+        gw.client = iam_client
+        return gw
+
+    arns = seed_iam()
+    seed_identities(arns["policy_arn"])
+    iam = boto3.client("iam", region_name="us-east-1")
+    iam.create_user(UserName="user-d")
+    iam.attach_user_policy(UserName="user-d", PolicyArn=arns["policy_arn"])
+    denied_app = create_app(home, testing=True, gateway_factory=gateway)
+    web = denied_app.test_client()
+    web.get("/")
+    _add_account(web)
+    body = _post(web, "/collect", {"background": "1"}).get_json()
+    assert denied_app.extensions["rolelens"]["jobs"].wait(body["job"]["id"], 30)
+    assert web.get(body["status_url"]).get_json()["job"]["state"] == "done"
+
+    assert 'href="/users/user-d"' in web.get("/policies").get_data(as_text=True)
+    page = web.get("/users").get_data(as_text=True)
+    assert "5 users" in page
+    for name in ("user-a", "user-admin", "user-b", "user-c", "user-d"):
+        assert f"<b>{name}</b>" in page, name
+    assert "not listed (iam:ListUsers)" in page
+    assert 'href="/users/user-a"' not in page  # no user page without iam:ListUsers data
+    assert web.get("/users.xlsx").status_code == 200
 
 
 def test_users_excel_export_columns(client, collected):  # noqa: F811

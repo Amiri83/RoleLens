@@ -507,6 +507,52 @@ def test_user_list_rows(db_path):
     assert a["findings"]["no-mfa"] == "high"
     assert rows["user-b"]["permissions"] == "group"
     assert rows["user-b"]["console"] is False
+    assert all(r["listed"] for r in rows.values())
+
+
+@mock_aws
+def test_user_list_includes_users_collected_without_list_users(db_path, monkeypatch):
+    """Regression: with iam:ListUsers denied, the users still collected as group members
+    (iam:GetGroup) and policy attachments (iam:ListEntitiesForPolicy) were shown on the
+    Groups and Policies pages but the Users page (user_list) was empty."""
+    gw = _gateway()
+    real_client = gw.client
+
+    def client(service, **kw):
+        c = real_client(service, **kw)
+        if service == "iam":
+            real_paginator = c.get_paginator
+
+            def get_paginator(op):
+                if op == "list_users":
+                    raise ClientError({"Error": {"Code": "AccessDenied", "Message": "x"}}, op)
+                return real_paginator(op)
+
+            c.get_paginator = get_paginator
+        return c
+
+    monkeypatch.setattr(gw, "client", client)
+    arns = seed_iam()
+    seed_identities(arns["policy_arn"])
+    iam = boto3.client("iam", region_name="us-east-1")
+    iam.create_user(UserName="user-d")  # in no group: known from the policy attachment only
+    iam.attach_user_policy(UserName="user-d", PolicyArn=arns["policy_arn"])
+    result = Collector(gw, db_path, report_wait=0).run()
+    assert result.users == 0
+    assert "iam:ListUsers skipped (AccessDenied)" in result.warnings
+    conn = connect(db_path)
+    try:
+        snap = result.snapshot_id
+        rows = {r["name"]: r for r in queries.user_list(conn, snap)}
+        usage = queries.policy_usage(conn, snap)[arns["policy_arn"]]
+    finally:
+        conn.close()
+    assert usage["user"] == ["user-d"]  # what the Policies page shows
+    assert list(rows) == ["user-a", "user-admin", "user-b", "user-c", "user-d"]
+    assert not any(r["listed"] for r in rows.values())
+    assert rows["user-a"]["groups"] == ["group-a"]
+    assert rows["user-a"]["console"] is None and rows["user-a"]["mfa"] is None
+    assert (rows["user-d"]["managed"], rows["user-d"]["permissions"]) == (1, "direct")
 
 
 @pytest.mark.parametrize(

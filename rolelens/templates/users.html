@@ -60,8 +60,13 @@
   <tbody id="users-tbody">
   {% for r in rows %}
     <tr>
+      {% if r.listed %}
       <td><a href="{{ url_for('user_page', name=r.name) }}"><b>{{ r.name }}</b></a>
         <div class="muted small mono">{{ r.path }}</div></td>
+      {% else %}
+      <td><b>{{ r.name }}</b>
+        <div class="muted small" title="seen as a group member or policy attachment; iam:ListUsers was not allowed">not listed (iam:ListUsers)</div></td>
+      {% endif %}
       <td>{% for g in r.groups %}<a href="{{ url_for('group_page', name=g) }}" class="tag">{{ g }}</a> {% else %}<span class="muted">none</span>{% endfor %}</td>
       <td>{{ known(r.console, 'yes', 'no') }}</td>
       <td>{% if r.console and r.mfa == false %}<span class="badge sev-high">no MFA</span>{% else %}{{ known(r.mfa, 'yes', 'no') }}{% endif %}</td>
@@ -75,11 +80,13 @@
         <span class="muted small">({{ r.managed + r.inline }} direct, {{ r.group_policies }} via groups)</span></td>
       <td>{% for rule, sev in r.findings.items() %}<a href="{{ url_for('user_page', name=r.name) }}#findings" class="badge sev-{{ sev }}" title="{{ finding_choices[rule] }} ({{ sev }})">{{ rule }}</a> {% else %}<span class="muted">–</span>{% endfor %}</td>
       <td style="white-space: nowrap">
+        {% if r.listed %}
         <a class="btn secondary" href="{{ url_for('user_page', name=r.name) }}">Graph</a>
         <form class="inline" method="post" action="{{ url_for('user_clone', name=r.name) }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <button type="submit" class="secondary" title="Copy the user's policies into a local draft (never written to AWS)">Clone to draft</button>
         </form>
+        {% endif %}
       </td>
     </tr>
   {% else %}
