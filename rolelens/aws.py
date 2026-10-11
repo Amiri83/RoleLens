@@ -4,8 +4,8 @@ Every client created through :class:`AwsGateway` has a botocore ``before-call``
 hook that rejects any API operation whose name does not start with ``List`` or
 ``Get`` (``Describe`` too, for completeness), and a few ``Get`` calls that return
 secret values or credentials. The only other operations allowed are the read-only
-reports of :data:`EXTRA_READ_ONLY_OPERATIONS` (usage data). RoleLens never mutates
-AWS: drafts and exports are local only.
+reports of :data:`EXTRA_READ_ONLY_OPERATIONS` (usage data and the IAM credential report).
+RoleLens never mutates AWS: drafts and exports are local only.
 """
 
 from __future__ import annotations
@@ -50,19 +50,31 @@ SECRET_VALUE_OPERATIONS = frozenset(
         ("sts", "GetSessionToken"),
         ("sts", "GetFederationToken"),
         ("ecr", "GetAuthorizationToken"),
+    }
+)
+
+# The IAM credential report: an optional, faster source of user metadata (console access,
+# MFA, access key age and last use). It holds no secret or key value; the collector keeps
+# only those fields (see rolelens.collector.parse_credential_report) and never stores or
+# logs the report itself. GenerateCredentialReport only starts building the report.
+CREDENTIAL_REPORT_OPERATIONS = frozenset(
+    {
+        ("iam", "GenerateCredentialReport"),
         ("iam", "GetCredentialReport"),
     }
 )
 
-
 # Read-only operations whose names carry no read-only prefix, allowed by exact name:
 # GenerateServiceLastAccessedDetails only starts a report job (read back with
 # GetServiceLastAccessedDetails); LookupEvents reads the CloudTrail event history.
-EXTRA_READ_ONLY_OPERATIONS = frozenset(
-    {
-        ("iam", "GenerateServiceLastAccessedDetails"),
-        ("cloudtrail", "LookupEvents"),
-    }
+EXTRA_READ_ONLY_OPERATIONS = (
+    frozenset(
+        {
+            ("iam", "GenerateServiceLastAccessedDetails"),
+            ("cloudtrail", "LookupEvents"),
+        }
+    )
+    | CREDENTIAL_REPORT_OPERATIONS
 )
 
 

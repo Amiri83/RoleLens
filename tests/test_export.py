@@ -130,6 +130,90 @@ def test_hcl_string_escapes_interpolation_and_quotes():
     assert hcl_string(True) == '"true"'
 
 
+USER_MODEL = {
+    "entity": "user",
+    "user_name": "user-a",
+    "path": "/",
+    "permissions_boundary": "arn:aws:iam::123456789012:policy/boundary-a",
+    "groups": ["group-a"],
+    "policies": [
+        {
+            "name": "user-inline-a",
+            "kind": "inline",
+            "document": MODEL["policies"][0]["document"],
+        },
+        {
+            "name": "policy-a",
+            "kind": "managed",
+            "arn": "arn:aws:iam::123456789012:policy/policy-a",
+            "path": "/",
+            "document": MODEL["policies"][0]["document"],
+        },
+        {"name": "policy-b", "kind": "aws", "arn": "arn:aws:iam::aws:policy/policy-b"},
+    ],
+}
+
+
+def test_user_terraform():
+    tf = terraform(USER_MODEL, "header line")
+    assert tf.startswith("# header line\n\n")
+    assert (
+        'resource "aws_iam_user" "user_a" {\n'
+        '  name                 = "user-a"\n'
+        '  path                 = "/"\n'
+        '  permissions_boundary = "arn:aws:iam::123456789012:policy/boundary-a"\n'
+        "}"
+    ) in tf
+    assert (
+        'resource "aws_iam_user_policy" "user_a_user_inline_a" {\n'
+        '  name   = "user-inline-a"\n'
+        "  user   = aws_iam_user.user_a.name\n"
+        "  policy = data.aws_iam_policy_document.user_a_user_inline_a.json\n"
+        "}"
+    ) in tf
+    assert (
+        'resource "aws_iam_user_policy_attachment" "user_a_policy_a" {\n'
+        "  user       = aws_iam_user.user_a.name\n"
+        "  policy_arn = aws_iam_policy.policy_a.arn\n"
+        "}"
+    ) in tf
+    assert 'policy_arn = "arn:aws:iam::aws:policy/policy-b"' in tf
+    assert (
+        'resource "aws_iam_user_group_membership" "user_a_groups" {\n'
+        "  user   = aws_iam_user.user_a.name\n"
+        '  groups = ["group-a"]\n'
+        "}"
+    ) in tf
+    assert "aws_iam_role" not in tf and "assume_role_policy" not in tf
+
+
+def test_user_and_policy_json_files():
+    files = json_files(USER_MODEL)
+    assert sorted(files) == [
+        "policies/inline-user-inline-a.json",
+        "policies/managed-policy-a.json",
+        "user.json",
+    ]
+    user = json.loads(files["user.json"])
+    assert user["Groups"] == ["group-a"]
+    assert user["ManagedPolicyArns"] == [
+        "arn:aws:iam::123456789012:policy/policy-a",
+        "arn:aws:iam::aws:policy/policy-b",
+    ]
+    policy = {
+        "entity": "policy",
+        "name": "policy-a",
+        "path": "/",
+        "description": "",
+        "arn": "",
+        "document": MODEL["policies"][0]["document"],
+    }
+    tf = terraform(policy)
+    assert tf.count('resource "aws_iam_policy"') == 1
+    assert "terraform import" not in tf and "description" not in tf
+    assert sorted(json_files(policy)) == ["policies/managed-policy-a.json", "policy.json"]
+
+
 def test_identifiers_are_unique_and_valid():
     taken: set[str] = set()
     assert identifier("role-a", taken) == "role_a"

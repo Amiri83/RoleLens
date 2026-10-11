@@ -1,5 +1,5 @@
-"""Flask application: accounts, IAM collection, roles, graph, insights, draft editor, export,
-logs."""
+"""Flask application: accounts, IAM collection, roles, users, groups, managed policies,
+graphs, insights, draft editor, export, logs."""
 
 from __future__ import annotations
 
@@ -47,8 +47,21 @@ from .collector import Collector
 from .config import AppPaths, default_paths
 from .crypto import SecretBox
 from .db import closing, connect, init_db
-from .filters import FINDINGS, LAST_USED, RoleFilters
-from .graph import build_graph
+from .filters import (
+    FINDINGS,
+    IDLE,
+    KEY_AGE,
+    LAST_USED,
+    PERMISSION_SOURCES,
+    POLICY_TYPES,
+    USED_BY,
+    USER_FINDINGS,
+    PolicyFilters,
+    RoleFilters,
+    UserFilters,
+)
+from .findings import KEY_MAX_AGE_DAYS, KEY_UNUSED_DAYS, mask_key
+from .graph import build_graph, build_identity_graph, build_policy_graph
 from .jobs import KINDS as JOB_KINDS
 from .jobs import JobBusy, JobCancelled, JobContext, JobFailed, JobManager, Progress
 from .logging_setup import LEVELS, configure_logging, read_log
@@ -56,7 +69,7 @@ from .policy import TRUST_TYPES, dumps
 from .settings import MAX_DISPLAY_NAME, REGIONS, Settings, SettingsStore
 from .usage import WINDOW_DAYS, UsageCollector
 from .validate import has_errors, validate_model
-from .xlsx import roles_workbook
+from .xlsx import policies_workbook, roles_workbook, users_workbook
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +161,38 @@ def local_time(value: Any) -> Markup | str:
     return Markup('<time class="localtime" datetime="{0}" title="{0}">{1}</time>').format(
         iso, fallback
     )
+
+
+def graph_links(graph: dict[str, Any]) -> dict[str, Any]:
+    """Add a ``url`` to the graph's role, user, group and managed policy nodes: the page
+    of that entity (graph.js shows it as a link in the node detail)."""
+    for el in graph.get("elements") or []:
+        data = el.get("data") or {}
+        detail = data.get("detail") or {}
+        kind, name = detail.get("kind"), detail.get("name", "")
+        url = ""
+        if kind == "role" and name:
+            url = url_for("role_page", name=name)
+        elif kind == "user" and name:
+            url = url_for("user_page", name=name)
+        elif kind == "group" and name:
+            url = url_for("group_page", name=name)
+        elif kind == "policy" and detail.get("arn"):
+            url = url_for("policy_page", arn=detail["arn"])
+        if url:
+            data["url"] = url
+    return graph
+
+
+def draft_graph(model: dict[str, Any]) -> dict[str, Any]:
+    """The live graph of a draft model (role, user or managed policy)."""
+    entity = drafts_mod.entity_of(model)
+    if entity == "user":
+        groups = [{"group_name": g, "policies": []} for g in model.get("groups") or []]
+        return build_identity_graph({**model, "groups": groups})
+    if entity == "policy":
+        return build_policy_graph({**model, "kind": "managed"}, {})
+    return build_graph(model)
 
 
 def _flask_secret(paths: AppPaths) -> bytes:
@@ -452,7 +497,7 @@ def _register(app: Flask) -> None:
         return render_template(
             "role.html",
             role=model,
-            graph=build_graph(model),
+            graph=graph_links(build_graph(model)),
             layouts=LAYOUTS,
             dumps=dumps,
             info=insights.role_insights(_db(), snap["id"], name),
@@ -461,7 +506,7 @@ def _register(app: Flask) -> None:
 
     @app.get("/roles/<name>/graph.json")
     def role_graph(name: str):
-        return jsonify(build_graph(_role_or_404(name)))
+        return jsonify(graph_links(build_graph(_role_or_404(name))))
 
     @app.post("/graph/export.<fmt>")
     def graph_export_file(fmt: str):
@@ -488,6 +533,228 @@ def _register(app: Flask) -> None:
         if draft_id is None:
             abort(404)
         log.info("draft %s cloned from a collected role (snapshot=%s)", draft_id, snap["id"])
+        flash("Draft created. It is local only: RoleLens never writes to AWS.", "ok")
+        return redirect(url_for("draft_edit", draft_id=draft_id))
+
+    # -- users and groups ------------------------------------------------------------
+
+    def _filtered_users(snap) -> tuple[UserFilters, list[dict[str, Any]], int]:
+        filters = UserFilters.from_args(request.args)
+        if snap is not None:
+            _analysed_snapshot()
+        rows = queries.user_list(_db(), snap["id"]) if snap else []
+        return filters, filters.apply(rows), len(rows)
+
+    @app.get("/users")
+    def users():
+        snap = _snapshot_or_none()
+        filters, rows, total = _filtered_users(snap)
+        return render_template(
+            "users.html",
+            snap=snap,
+            rows=rows,
+            total=total,
+            f=filters,
+            key_age_choices=KEY_AGE,
+            idle_choices=IDLE,
+            perms_choices=PERMISSION_SOURCES,
+            finding_choices=USER_FINDINGS,
+        )
+
+    @app.get("/users.xlsx")
+    def users_xlsx():
+        """The Users page as shown: same filters (query string), same rows."""
+        snap = _snapshot_or_none()
+        if snap is None:
+            abort(404, NO_DATA)
+        filters, rows, total = _filtered_users(snap)
+        by_user = insights.identity_findings(_db(), snap["id"], "user")
+        findings = [f for r in rows for f in by_user.get(r["name"], [])]
+        data = users_workbook(
+            rows,
+            filters,
+            account=account_label(snap["account_id"], snap["account_name"]),
+            taken_at=snap["taken_at"],
+            total=total,
+            findings=findings,
+        )
+        log.info(
+            "users exported to Excel (%d of %d rows, %d findings)", len(rows), total, len(findings)
+        )
+        stamp = (utc_iso(snap["taken_at"]) or "")[:10]
+        return _download(data, f"rolelens-users-{stamp}.xlsx", XLSX_MIMETYPE)
+
+    def _identity_or_404(ptype: str, name: str) -> dict[str, Any]:
+        snap = _analysed_snapshot()
+        if snap is None:
+            abort(404, NO_DATA)
+        model = (queries.user_model if ptype == "user" else queries.group_model)(
+            _db(), snap["id"], name
+        )
+        if model is None:
+            abort(404)
+        return model
+
+    @app.get("/users/<name>")
+    def user_page(name: str):
+        model = _identity_or_404("user", name)
+        snap = _snapshot_or_none()
+        return render_template(
+            "identity.html",
+            entity=model,
+            ptype="user",
+            name=name,
+            graph=graph_links(build_identity_graph(model)),
+            layouts=LAYOUTS,
+            dumps=dumps,
+            info=insights.identity_insights(_db(), snap["id"], "user", name),
+            mask_key=mask_key,
+            key_max_age=KEY_MAX_AGE_DAYS,
+            key_unused=KEY_UNUSED_DAYS,
+        )
+
+    @app.get("/users/<name>/graph.json")
+    def user_graph(name: str):
+        return jsonify(graph_links(build_identity_graph(_identity_or_404("user", name))))
+
+    @app.post("/users/<name>/clone")
+    def user_clone(name: str):
+        return _clone("user", name)
+
+    @app.get("/groups")
+    def groups():
+        snap = _analysed_snapshot()
+        q = (request.args.get("q") or "").strip()[:200]
+        rows = queries.group_list(_db(), snap["id"]) if snap else []
+        total = len(rows)
+        if q:
+            needle = q.lower()
+            rows = [
+                r
+                for r in rows
+                if needle in " ".join([r["name"], r["path"], r["arn"], *r["members"]]).lower()
+            ]
+        return render_template(
+            "groups.html", snap=snap, rows=rows, total=total, q=q, finding_choices=USER_FINDINGS
+        )
+
+    @app.get("/groups/<name>")
+    def group_page(name: str):
+        model = _identity_or_404("group", name)
+        snap = _snapshot_or_none()
+        return render_template(
+            "identity.html",
+            entity=model,
+            ptype="group",
+            name=name,
+            graph=graph_links(build_identity_graph(model)),
+            layouts=LAYOUTS,
+            dumps=dumps,
+            info=insights.identity_insights(_db(), snap["id"], "group", name),
+        )
+
+    @app.get("/groups/<name>/graph.json")
+    def group_graph(name: str):
+        return jsonify(graph_links(build_identity_graph(_identity_or_404("group", name))))
+
+    # -- managed policies ------------------------------------------------------------
+
+    def _filtered_policies(snap) -> tuple[PolicyFilters, list[dict[str, Any]], int, list]:
+        """Filters, the rows they keep, the total and the findings of the kept rows."""
+        filters = PolicyFilters.from_args(request.args)
+        rows = filters.apply(queries.policy_list(_db(), snap["id"])) if snap else []
+        total = (
+            _db()
+            .execute("SELECT COUNT(*) FROM managed_policies WHERE snapshot_id=?", (snap["id"],))
+            .fetchone()[0]
+            if snap
+            else 0
+        )
+        found = insights.add_policy_findings(rows, snap["account_id"] or None) if snap else []
+        return filters, rows, total, found
+
+    @app.get("/policies")
+    def policies():
+        snap = _snapshot_or_none()
+        filters, rows, total, _found = _filtered_policies(snap)
+        return render_template(
+            "policies.html",
+            snap=snap,
+            rows=rows,
+            total=total,
+            f=filters,
+            type_choices=POLICY_TYPES,
+            used_by_choices=USED_BY,
+        )
+
+    @app.get("/policies.xlsx")
+    def policies_xlsx():
+        """The Policies page as shown: same filters (query string), same rows."""
+        snap = _snapshot_or_none()
+        if snap is None:
+            abort(404, NO_DATA)
+        filters, rows, total, findings = _filtered_policies(snap)
+        data = policies_workbook(
+            rows,
+            filters,
+            account=account_label(snap["account_id"], snap["account_name"]),
+            taken_at=snap["taken_at"],
+            total=total,
+            findings=findings,
+        )
+        log.info(
+            "policies exported to Excel (%d of %d rows, %d findings)",
+            len(rows),
+            total,
+            len(findings),
+        )
+        stamp = (utc_iso(snap["taken_at"]) or "")[:10]
+        return _download(data, f"rolelens-policies-{stamp}.xlsx", XLSX_MIMETYPE)
+
+    def _policy_or_404() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """The managed policy of the ``arn`` query parameter and its findings."""
+        snap = _snapshot_or_none()
+        if snap is None:
+            abort(404, NO_DATA)
+        policy = queries.policy_detail(_db(), snap["id"], request.args.get("arn", ""))
+        if policy is None:
+            abort(404)
+        return policy, insights.add_policy_findings([policy], snap["account_id"] or None)
+
+    def _policy_graph(policy: dict[str, Any]) -> dict[str, Any]:
+        usage = {"role": policy["roles"], "user": policy["users"], "group": policy["groups"]}
+        return graph_links(build_policy_graph(policy, usage))
+
+    @app.get("/policies/view")
+    def policy_page():
+        policy, findings = _policy_or_404()
+        return render_template(
+            "policy.html",
+            p=policy,
+            findings=findings,
+            graph=_policy_graph(policy),
+            layouts=LAYOUTS,
+            dumps=dumps,
+        )
+
+    @app.get("/policies/graph.json")
+    def policy_graph():
+        return jsonify(_policy_graph(_policy_or_404()[0]))
+
+    @app.post("/policies/clone")
+    def policy_clone():
+        return _clone("policy", request.form.get("arn", ""))
+
+    def _clone(entity: str, name: str):
+        """Clone a collected user or customer managed policy (``name``: its ARN) to a draft."""
+        snap = _snapshot_or_none()
+        if snap is None:
+            abort(404, NO_DATA)
+        with closing(_paths().db_path) as conn:
+            draft_id = drafts_mod.clone(conn, _active_ref(), snap["id"], name, entity)
+        if draft_id is None:
+            abort(404)
+        log.info("draft %s cloned from a collected %s (snapshot=%s)", draft_id, entity, snap["id"])
         flash("Draft created. It is local only: RoleLens never writes to AWS.", "ok")
         return redirect(url_for("draft_edit", draft_id=draft_id))
 
@@ -576,7 +843,8 @@ def _register(app: Flask) -> None:
             label = account_label(result.account_id, account.display_name)
             ctx.message(
                 "ok",
-                f"Collected {label}: {result.roles} roles, {result.inline_policies} inline "
+                f"Collected {label}: {result.roles} roles, {result.users} users, "
+                f"{result.groups} groups, {result.inline_policies} inline "
                 f"and {result.managed_policies} managed policies",
             )
             mismatch = accounts.record_identity(account.id, result.account_id)
@@ -670,15 +938,23 @@ def _register(app: Flask) -> None:
         threshold = recommend.parse_threshold(request.args.get("threshold"), default)
         dups: list[list[str]] = []
         pairs: list[dict[str, Any]] = []
+        identities: dict[str, dict[str, Any]] = {}
         if snap is not None:
             perms = insights.role_perms(_db(), snap["id"])
             dups = recommend.duplicates(perms)
             pairs = recommend.overlaps(perms, threshold)
+            for ptype in ("user", "group"):
+                found = insights.identity_perms(_db(), snap["id"], ptype)
+                identities[ptype] = {
+                    "duplicates": recommend.duplicates(found),
+                    "overlaps": recommend.overlaps(found, threshold),
+                }
         return render_template(
             "recommendations.html",
             snap=snap,
             duplicates=dups,
             overlaps=pairs,
+            identities=identities,
             threshold=threshold,
             default_threshold=default,
             limit=recommend.MAX_OVERLAPS,
@@ -764,7 +1040,7 @@ def _register(app: Flask) -> None:
         return {
             "ok": not has_errors(issues),
             "issues": [i.as_dict() for i in issues],
-            "graph": build_graph(model) if model is not None else None,
+            "graph": draft_graph(model) if model is not None else None,
             "diff": drafts_mod.diff(draft["original"], model) if model is not None else None,
         }
 
@@ -838,7 +1114,7 @@ def _register(app: Flask) -> None:
         draft = _draft_or_404(draft_id)
         with closing(_paths().db_path) as conn:
             drafts_mod.save(conn, draft_id, draft["original"])
-        flash("Draft reset to the collected role.", "ok")
+        flash(f"Draft reset to the collected {draft['entity']}.", "ok")
         return redirect(url_for("draft_edit", draft_id=draft_id))
 
     @app.post("/drafts/<int:draft_id>/delete")
@@ -853,14 +1129,15 @@ def _register(app: Flask) -> None:
     # -- export ----------------------------------------------------------------------
 
     def _export_header(draft: dict[str, Any]) -> str:
+        entity = "managed policy" if draft["entity"] == "policy" else draft["entity"]
         return (
-            f"Generated by RoleLens from draft {draft['id']} (cloned from role "
+            f"Generated by RoleLens from draft {draft['id']} (cloned from {entity} "
             f"{draft['source_role']}).\nReview it and run terraform plan yourself: RoleLens "
             "never writes to AWS."
         )
 
     def _export_name(draft: dict[str, Any]) -> str:
-        return export_mod.identifier(draft["model"].get("role_name") or "role", set())
+        return export_mod.identifier(draft["name"] or draft["entity"], set())
 
     @app.get("/drafts/<int:draft_id>/export")
     def draft_export(draft_id: int):

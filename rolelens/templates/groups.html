@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% from "_macros.html" import no_data with context %}
+{% block title %}Groups{% endblock %}
+{% block content %}
+<h1>IAM groups</h1>
+<div id="groups-data" data-refresh>
+{% if not snap %}
+  {{ no_data() }}
+{% else %}
+<form method="get" action="{{ url_for('groups') }}" class="row search-row" role="search">
+  <input name="q" type="search" value="{{ q }}" placeholder="name, path, ARN or member" aria-label="Filter groups" autocomplete="off">
+  <button type="submit" class="secondary">Filter</button>
+  <span class="muted small">{% if q %}{{ rows | length }} of {{ total }} groups match{% else %}{{ total }} group{{ '' if total == 1 else 's' }}{% endif %}</span>
+  {% if q %}<a href="{{ url_for('groups') }}" class="small">Clear</a>{% endif %}
+</form>
+<table id="groups-table" class="roles">
+  <thead><tr><th>Group</th><th>Path</th><th>Members</th><th>Policies</th><th>Findings</th><th></th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td><a href="{{ url_for('group_page', name=r.name) }}"><b>{{ r.name }}</b></a></td>
+      <td class="mono">{{ r.path }}</td>
+      <td>{% for u in r.members %}<a href="{{ url_for('user_page', name=u) }}" class="tag">{{ u }}</a> {% else %}<span class="muted">none</span>{% endfor %}</td>
+      <td>{{ r.policies }} <span class="muted small">({{ r.managed }} managed, {{ r.inline }} inline)</span></td>
+      <td>{% for rule, sev in r.findings.items() %}<a href="{{ url_for('group_page', name=r.name) }}#findings" class="badge sev-{{ sev }}" title="{{ finding_choices.get(rule, rule) }} ({{ sev }})">{{ rule }}</a> {% else %}<span class="muted">–</span>{% endfor %}</td>
+      <td><a class="btn secondary" href="{{ url_for('group_page', name=r.name) }}">Graph</a></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="muted">No group{% if q %} matches — <a href="{{ url_for('groups') }}">clear the filter</a>{% endif %}.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+</div>
+{% endblock %}

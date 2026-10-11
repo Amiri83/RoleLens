@@ -1,11 +1,13 @@
 """Insights of a snapshot: effective permissions, risk findings, recommendations, usage.
 
 :func:`analyze` computes the effective permissions (:mod:`rolelens.effective`) and risk
-findings (:mod:`rolelens.findings`) of every role from the collected policies and stores
-them (tables ``role_permissions`` / ``role_findings``); it runs at the end of every
+findings (:mod:`rolelens.findings`) of every role, user and group from the collected
+policies and stores them (tables ``role_permissions`` / ``role_findings`` and
+``identity_permissions`` / ``identity_findings``); it runs at the end of every
 collection and, through :func:`ensure_analysis`, for older snapshots the first time a
-page needs them. Usage data comes from :mod:`rolelens.usage` (a separate, optional job).
-Everything here reads SQLite only; nothing calls AWS.
+page needs them. A user's effective permissions are the union of its own policies and
+those of its groups. Usage data comes from :mod:`rolelens.usage` (a separate, optional
+job). Everything here reads SQLite only; nothing calls AWS.
 """
 
 from __future__ import annotations
@@ -20,15 +22,87 @@ from typing import Any
 from . import queries
 from .db import closing
 from .effective import Grant, canonical, effective_permissions
-from .findings import RULES, SEVERITIES, risk_score, role_findings, worst
+from .findings import (
+    RULES,
+    SEVERITIES,
+    group_findings,
+    policy_findings,
+    risk_score,
+    role_findings,
+    rules_for,
+    user_findings,
+    worst,
+)
 from .recommend import RolePerms
 from .usage import SOURCE_LABELS, WINDOW_DAYS
 
 # Bump when the effective-permission expansion or a rule changes: stored analyses of an
 # older version are recomputed.
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 2
 TOP_ROLES = 10
 TOP_UNUSED = 15
+
+
+def _identity_model(
+    conn: sqlite3.Connection, snap_id: int, ptype: str, name: str
+) -> dict[str, Any] | None:
+    if ptype == "user":
+        return queries.user_model(conn, snap_id, name)
+    return queries.group_model(conn, snap_id, name)
+
+
+def analyze_identities(
+    conn: sqlite3.Connection, snap_id: int, own: str | None, now: datetime | None = None
+) -> tuple[int, int]:
+    """Effective permissions and findings of every user and group: ``(grants, findings)``."""
+    conn.execute("DELETE FROM identity_permissions WHERE snapshot_id=?", (snap_id,))
+    conn.execute("DELETE FROM identity_findings WHERE snapshot_id=?", (snap_id,))
+    grants = findings = 0
+    for ptype, table, column in (
+        ("user", "users", "user_name"),
+        ("group", "iam_groups", "group_name"),
+    ):
+        names = [
+            r[0]
+            for r in conn.execute(
+                f"SELECT {column} FROM {table} WHERE snapshot_id=?",  # noqa: S608 - fixed names
+                (snap_id,),
+            )
+        ]
+        for name in names:
+            model = _identity_model(conn, snap_id, ptype, name)
+            if model is None:
+                continue
+            perms = effective_permissions({"policies": queries.all_policies(model)})
+            conn.executemany(
+                "INSERT INTO identity_permissions(snapshot_id, principal_type, principal_name, "
+                "action, resource, condition, policies) VALUES(?,?,?,?,?,?,?)",
+                [(snap_id, ptype, name, *g, json.dumps(p)) for g, p in perms.items()],
+            )
+            found = (
+                user_findings(model, own, now) if ptype == "user" else group_findings(model, own)
+            )
+            conn.executemany(
+                "INSERT INTO identity_findings(snapshot_id, principal_type, principal_name, rule, "
+                "severity, location, why, fix, statements) VALUES(?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        snap_id,
+                        ptype,
+                        name,
+                        f.rule,
+                        f.severity,
+                        f.where,
+                        f.why,
+                        f.fix,
+                        json.dumps(f.statements),
+                    )
+                    for f in found
+                ],
+            )
+            grants += len(perms)
+            findings += len(found)
+    return grants, findings
 
 
 def analyze(conn: sqlite3.Connection, snap_id: int) -> dict[str, int]:
@@ -63,11 +137,16 @@ def analyze(conn: sqlite3.Connection, snap_id: int) -> dict[str, int]:
         )
         grants += len(perms)
         findings += len(found)
+    identity_grants, identity_found = analyze_identities(conn, snap_id, own)
     conn.execute(
         "INSERT OR REPLACE INTO analysis(snapshot_id, version, analyzed_at) VALUES(?,?,?)",
         (snap_id, ANALYSIS_VERSION, datetime.now(UTC).isoformat(timespec="seconds")),
     )
-    return {"roles": len(names), "grants": grants, "findings": findings}
+    return {
+        "roles": len(names),
+        "grants": grants + identity_grants,
+        "findings": findings + identity_found,
+    }
 
 
 def ensure_analysis(db_path: Path | str, snap_id: int) -> None:
@@ -94,9 +173,91 @@ def findings_by_role(conn: sqlite3.Connection, snap_id: int) -> dict[str, list[d
     return out
 
 
-def _finding(r: sqlite3.Row) -> dict[str, Any]:
+def identity_findings(
+    conn: sqlite3.Connection, snap_id: int, ptype: str
+) -> dict[str, list[dict[str, Any]]]:
+    """``{user or group: [finding]}`` (``ptype``: user | group), like findings_by_role."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for r in conn.execute(
+        "SELECT * FROM identity_findings WHERE snapshot_id=? AND principal_type=? "
+        "ORDER BY principal_name",
+        (snap_id, ptype),
+    ):
+        out.setdefault(r["principal_name"], []).append(_finding(r, "principal_name"))
+    for items in out.values():
+        items.sort(key=lambda f: (SEVERITIES.index(f["severity"]), f["rule"], f["where"]))
+    return out
+
+
+def identity_insights(
+    conn: sqlite3.Connection, snap_id: int, ptype: str, name: str
+) -> dict[str, Any]:
+    """Findings and effective permissions of one user or group (user and group pages)."""
+    findings = identity_findings(conn, snap_id, ptype).get(name, [])
+    perms = [
+        {
+            "action": r["action"],
+            "resource": r["resource"],
+            "condition": r["condition"],
+            "policies": json.loads(r["policies"]),
+        }
+        for r in conn.execute(
+            "SELECT * FROM identity_permissions WHERE snapshot_id=? AND principal_type=? "
+            "AND principal_name=? ORDER BY action, resource",
+            (snap_id, ptype, name),
+        )
+    ]
     return {
-        "role": r["role_name"],
+        "findings": findings,
+        "score": risk_score(findings),
+        "permissions": perms,
+        "actions": sorted({p["action"] for p in perms}),
+    }
+
+
+def identity_perms(conn: sqlite3.Connection, snap_id: int, ptype: str) -> list[RolePerms]:
+    """Every user or group with its grants and actions (recommendations). There is no
+    trust policy: ``trust`` is empty, so duplicates are equal grants."""
+    grants: dict[str, set[Grant]] = {}
+    for r in conn.execute(
+        "SELECT principal_name, action, resource, condition FROM identity_permissions "
+        "WHERE snapshot_id=? AND principal_type=?",
+        (snap_id, ptype),
+    ):
+        grants.setdefault(r["principal_name"], set()).add(
+            Grant(r["action"], r["resource"], r["condition"])
+        )
+    table, column = ("users", "user_name") if ptype == "user" else ("iam_groups", "group_name")
+    out = []
+    for r in conn.execute(
+        f"SELECT {column} AS name FROM {table} WHERE snapshot_id=? "  # noqa: S608 - fixed names
+        "ORDER BY name COLLATE NOCASE",
+        (snap_id,),
+    ):
+        g = frozenset(grants.get(r["name"], set()))
+        out.append(RolePerms(r["name"], g, frozenset(x.action for x in g), ""))
+    return out
+
+
+def add_policy_findings(rows: list[dict[str, Any]], own: str | None) -> list[dict[str, Any]]:
+    """Run the permission policy rules on each managed policy row (Policies page): sets
+    ``findings`` (rule -> worst severity) and ``severity`` on the rows and returns every
+    finding (dicts like :func:`findings_by_role`'s, ``role`` is the policy name)."""
+    out = []
+    for r in rows:
+        found = [f.as_dict() for f in policy_findings(r, own)]
+        by_rule: dict[str, str] = {}
+        for f in found:
+            by_rule.setdefault(f["rule"], f["severity"])  # worst first (sorted)
+        r["findings"] = by_rule
+        r["severity"] = next(iter(by_rule.values()), "")
+        out += found
+    return out
+
+
+def _finding(r: sqlite3.Row, name_column: str = "role_name") -> dict[str, Any]:
+    return {
+        "role": r[name_column],
         "rule": r["rule"],
         "title": RULES[r["rule"]].title if r["rule"] in RULES else r["rule"],
         "severity": r["severity"],
@@ -251,13 +412,65 @@ def role_insights(
     }
 
 
+def identity_dashboard(conn: sqlite3.Connection, snap_id: int) -> dict[str, Any]:
+    """Users and groups: findings per rule and the riskiest of them."""
+    by_type = {t: identity_findings(conn, snap_id, t) for t in ("user", "group")}
+    rules = []
+    for rule, meta in RULES.items():
+        if "user" not in meta.applies and "group" not in meta.applies:
+            continue
+        counts = {}
+        items = []
+        for ptype, by_name in by_type.items():
+            names = [n for n, fs in by_name.items() if any(f["rule"] == rule for f in fs)]
+            counts[ptype] = len(names)
+            items += [f for fs in by_name.values() for f in fs if f["rule"] == rule]
+        rules.append(
+            {
+                "rule": rule,
+                "title": meta.title,
+                "summary": meta.summary,
+                "severity": worst([f["severity"] for f in items]) or meta.severity,
+                "findings": len(items),
+                "users": counts["user"],
+                "groups": counts["group"],
+                "applies": meta.applies,
+            }
+        )
+    risky = sorted(
+        (
+            {
+                "type": ptype,
+                "name": name,
+                "score": risk_score(fs),
+                "worst": worst([f["severity"] for f in fs]),
+                "findings": len(fs),
+                "rules": sorted({f["rule"] for f in fs}),
+            }
+            for ptype, by_name in by_type.items()
+            for name, fs in by_name.items()
+        ),
+        key=lambda r: (-r["score"], r["type"], r["name"].lower()),
+    )
+    totals = {
+        "users": conn.execute("SELECT COUNT(*) FROM users WHERE snapshot_id=?", (snap_id,)),
+        "groups": conn.execute("SELECT COUNT(*) FROM iam_groups WHERE snapshot_id=?", (snap_id,)),
+    }
+    return {
+        "rules": rules,
+        "risky": [r for r in risky if r["score"]][:TOP_ROLES],
+        "total_users": totals["users"].fetchone()[0],
+        "total_groups": totals["groups"].fetchone()[0],
+    }
+
+
 def dashboard(
     conn: sqlite3.Connection, snap_id: int, now: datetime | None = None
 ) -> dict[str, Any]:
     """Counts per finding type, top risky roles, top unused permissions, analyzer findings."""
     by_role = findings_by_role(conn, snap_id)
     rule_counts = []
-    for rule, meta in RULES.items():
+    for rule, meta in rules_for("role").items():
         roles = [r for r, fs in by_role.items() if any(f["rule"] == rule for f in fs)]
         items = [f for fs in by_role.values() for f in fs if f["rule"] == rule]
         rule_counts.append(
@@ -322,6 +535,7 @@ def dashboard(
         "SELECT COUNT(*) FROM roles WHERE snapshot_id=?", (snap_id,)
     ).fetchone()[0]
     return {
+        "identities": identity_dashboard(conn, snap_id),
         "rules": rule_counts,
         "severities": [(s, severity_counts.get(s, 0)) for s in SEVERITIES],
         "risky": [r for r in risky if r["score"]][:TOP_ROLES],

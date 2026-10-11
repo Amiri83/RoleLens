@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% from "_macros.html" import no_data with context %}
+{% block title %}Users{% endblock %}
+{% macro choice(name, label, options, value) -%}
+  <select name="{{ name }}" form="user-filters" aria-label="{{ label }}" title="{{ label }}">
+    <option value="">{{ label }}: any</option>
+    {% for key, text in options.items() %}<option value="{{ key }}" {{ 'selected' if key == value }}>{{ text }}</option>{% endfor %}
+  </select>
+{%- endmacro %}
+{% macro known(flag, yes, no) -%}
+  {% if flag is none %}<span class="muted" title="not collected (missing permission)">?</span>
+  {%- elif flag %}{{ yes }}{% else %}{{ no }}{% endif %}
+{%- endmacro %}
+{% block content %}
+<div class="row" style="justify-content: space-between">
+  <h1>IAM users</h1>
+  {% if active_account %}
+  <form method="post" action="{{ url_for('collect') }}" data-job="collect">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" title="Read-only: roles, users, groups and managed policies (iam:List* / iam:Get*; the credential report when allowed)">Collect from AWS</button>
+  </form>
+  {% endif %}
+</div>
+{# Re-fetched in place after a collection (refresh.js); the filters re-fetch only
+   #users-summary and #users-tbody (roles.js). #}
+<div id="users-data" data-refresh>
+{% if not snap %}
+  {{ no_data() }}
+{% else %}
+<form id="user-filters" method="get" action="{{ url_for('users') }}" class="row search-row" role="search"
+      data-filters data-regions="#users-summary, #users-tbody">
+  <div id="users-summary" class="row roles-summary">
+    <span class="muted small" id="user-count">
+      {%- if f.active %}{{ rows | length }} of {{ total }} users match the filters
+      {%- else %}{{ total }} user{{ '' if total == 1 else 's' }}{% endif %}</span>
+    <a class="btn secondary" id="users-xlsx" href="{{ url_for('users_xlsx', **f.query()) }}"
+       title="Download the users shown below (current filters) as an Excel workbook">Export to Excel</a>
+    {% if f.active %}<a href="{{ url_for('users') }}" class="small">Clear filters</a>{% endif %}
+  </div>
+  <button type="submit" class="secondary" id="filters-apply">Apply filters</button>
+</form>
+<p class="muted small">Console access, MFA and access key use come from the IAM credential report when it is allowed,
+  else from iam:GetLoginProfile, iam:ListMFADevices and iam:GetAccessKeyLastUsed. Secret keys and passwords are never read.</p>
+<table id="users-table" class="roles">
+  <thead>
+    <tr><th>User</th><th>Groups</th><th>Console</th><th>MFA</th><th>Access keys</th><th>Last activity</th><th>Policies</th><th>Findings</th><th></th></tr>
+    <tr class="col-filters">
+      <td colspan="2"><input name="q" form="user-filters" type="search" value="{{ f.q }}" placeholder="name, path, ARN or group"
+          autocomplete="off" aria-label="Filter by name, path, ARN or group"></td>
+      <td>{{ choice('console', 'Console', {'yes': 'console access', 'no': 'no console access'}, f.console) }}</td>
+      <td>{{ choice('mfa', 'MFA', {'yes': 'MFA', 'no': 'no MFA'}, f.mfa) }}</td>
+      <td>{{ choice('key_age', 'Key age', key_age_choices, f.key_age) }}</td>
+      <td>{{ choice('idle', 'Activity', idle_choices, f.idle) }}</td>
+      <td>{{ choice('perms', 'Permissions', perms_choices, f.perms) }}
+          {{ choice('inline', 'Inline', {'yes': 'has inline', 'no': 'no inline'}, f.inline) }}</td>
+      <td>{{ choice('finding', 'Finding', finding_choices, f.finding) }}</td>
+      <td></td>
+    </tr>
+  </thead>
+  <tbody id="users-tbody">
+  {% for r in rows %}
+    <tr>
+      <td><a href="{{ url_for('user_page', name=r.name) }}"><b>{{ r.name }}</b></a>
+        <div class="muted small mono">{{ r.path }}</div></td>
+      <td>{% for g in r.groups %}<a href="{{ url_for('group_page', name=g) }}" class="tag">{{ g }}</a> {% else %}<span class="muted">none</span>{% endfor %}</td>
+      <td>{{ known(r.console, 'yes', 'no') }}</td>
+      <td>{% if r.console and r.mfa == false %}<span class="badge sev-high">no MFA</span>{% else %}{{ known(r.mfa, 'yes', 'no') }}{% endif %}</td>
+      <td>{% if r.active_keys %}{{ r.active_keys }} active
+          <div class="muted small">oldest {{ r.key_age_days }} d{% if r.key_unused_days is not none %} · unused {{ r.key_unused_days }} d{% endif %}</div>
+          {% elif r.keys %}<span class="muted">{{ r.keys }} inactive</span>{% else %}<span class="muted">none</span>{% endif %}</td>
+      <td>{% if r.last_activity %}{{ r.last_activity | localtime }}
+          {% if r.idle_days is not none %}<div class="muted small">{{ r.idle_days }} day{{ '' if r.idle_days == 1 else 's' }} ago</div>{% endif %}
+          {% else %}<span class="badge warn">never / unknown</span>{% endif %}</td>
+      <td title="{{ r.managed }} managed · {{ r.inline }} inline (direct) · {{ r.group_policies }} via groups">{{ r.policies }}
+        <span class="muted small">({{ r.managed + r.inline }} direct, {{ r.group_policies }} via groups)</span></td>
+      <td>{% for rule, sev in r.findings.items() %}<a href="{{ url_for('user_page', name=r.name) }}#findings" class="badge sev-{{ sev }}" title="{{ finding_choices[rule] }} ({{ sev }})">{{ rule }}</a> {% else %}<span class="muted">–</span>{% endfor %}</td>
+      <td style="white-space: nowrap">
+        <a class="btn secondary" href="{{ url_for('user_page', name=r.name) }}">Graph</a>
+        <form class="inline" method="post" action="{{ url_for('user_clone', name=r.name) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="secondary" title="Copy the user's policies into a local draft (never written to AWS)">Clone to draft</button>
+        </form>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="9" class="muted">No user matches{% if f.active %} the filters — <a href="{{ url_for('users') }}">clear them</a>{% endif %}.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='roles.js') }}" defer></script>
+{% endblock %}

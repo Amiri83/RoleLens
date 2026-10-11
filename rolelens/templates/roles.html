@@ -13,7 +13,7 @@
   {% if active_account %}
   <form method="post" action="{{ url_for('collect') }}" data-job="collect">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button type="submit" title="Read-only: iam:ListRoles, GetRole, List*/GetRolePolicy, GetPolicy, GetPolicyVersion">Collect from AWS</button>
+    <button type="submit" title="Read-only: roles, users, groups and managed policies (iam:List* / iam:Get*; the credential report when allowed)">Collect from AWS</button>
   </form>
   {% endif %}
 </div>
@@ -23,7 +23,8 @@
 {% if not snap %}
   {{ no_data() }}
 {% else %}
-<form id="role-filters" method="get" action="{{ url_for('roles') }}" class="row search-row" role="search">
+<form id="role-filters" method="get" action="{{ url_for('roles') }}" class="row search-row" role="search"
+      data-filters data-regions="#roles-summary, #roles-tbody">
   <div id="roles-summary" class="row roles-summary">
     <span class="muted small" id="role-count">
       {%- if f.active %}{{ rows | length }} of {{ total }} roles match the filters

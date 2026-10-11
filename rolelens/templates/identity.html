@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% from "_macros.html" import graph_panel, graph_scripts with context %}
+{% from "_findings.html" import finding_list %}
+{# The page of an IAM user or group (ptype). #}
+{% block title %}{{ name }}{% endblock %}
+{% macro policy_card(p, via='') -%}
+<details class="card">
+  <summary><b>{{ p.name }}</b> <span class="badge">{{ {'inline': 'inline', 'managed': 'customer managed', 'aws': 'AWS managed'}[p.kind] }}</span>
+    {% if via %}<span class="badge" title="attached to the group">via group <a href="{{ url_for('group_page', name=via) }}">{{ via }}</a></span>{% endif %}
+    {% if p.arn %}<a class="muted mono small" href="{{ url_for('policy_page', arn=p.arn) }}">{{ p.arn }}</a>{% endif %}</summary>
+  {% if p.document is none %}<p class="badge warn">document not readable (see the collection warnings)</p>
+  {% else %}<pre class="json">{{ dumps(p.document) }}</pre>{% endif %}
+</details>
+{%- endmacro %}
+{% block content %}
+<p><a href="{{ url_for('users' if ptype == 'user' else 'groups') }}" class="back-link">← {{ 'Users' if ptype == 'user' else 'Groups' }}</a></p>
+<div class="row" style="justify-content: space-between">
+  <h1>{{ name }} <span class="badge">{{ ptype }}</span> <span class="muted mono small">{{ entity.path }}</span></h1>
+  {% if ptype == 'user' %}
+  <form method="post" action="{{ url_for('user_clone', name=name) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" title="Copy the user's own policies and group memberships into a local draft (never written to AWS)">Clone to draft</button>
+  </form>
+  {% endif %}
+</div>
+
+<div id="identity-meta" data-refresh>
+{% if ptype == 'user' %}
+<p class="muted">
+  {% if entity.arn %}<span class="mono">{{ entity.arn }}</span> · {% endif %}
+  created {{ entity.create_date | localtime }}
+  · console access: {% if entity.password_enabled is none %}unknown{% elif entity.password_enabled %}<b>yes</b>{% if entity.password_last_used %} (last sign-in {{ entity.password_last_used | localtime }}){% endif %}{% else %}no{% endif %}
+  · MFA: {% if entity.mfa_active is none %}unknown{% elif entity.mfa_active %}yes{% if entity.mfa_devices %} ({{ entity.mfa_devices }} device{{ '' if entity.mfa_devices == 1 else 's' }}){% endif %}{% else %}<span class="badge {{ 'sev-high' if entity.password_enabled else 'warn' }}">none</span>{% endif %}
+  {% if entity.permissions_boundary %}· permissions boundary <span class="mono">{{ entity.permissions_boundary }}</span>{% endif %}
+  {% if entity.metadata_source == 'report' %}<span class="small">(from the credential report)</span>{% endif %}
+</p>
+<p>Groups: {% for g in entity.groups %}<a href="{{ url_for('group_page', name=g.group_name) }}" class="tag">{{ g.group_name }}</a> {% else %}<span class="muted">none</span>{% endfor %}</p>
+{% else %}
+<p class="muted">{% if entity.arn %}<span class="mono">{{ entity.arn }}</span> · {% endif %}created {{ entity.create_date | localtime }}</p>
+<p>Members ({{ entity.members | length }}): {% for u in entity.members %}<a href="{{ url_for('user_page', name=u) }}" class="tag">{{ u }}</a> {% else %}<span class="muted">none</span>{% endfor %}</p>
+{% endif %}
+</div>
+
+{{ graph_panel(layouts, 'graph-data', name) }}
+<script type="application/json" id="graph-data">{{ graph | tojson }}</script>
+
+<div id="identity-docs" data-refresh>
+{% if ptype == 'user' %}
+<h2 id="access-keys">Access keys ({{ entity.access_keys | length }})</h2>
+<p class="muted small">Key id (shortened), status, age and last use only. Keys older than {{ key_max_age }} days or unused for
+  more than {{ key_unused }} days are reported as findings.</p>
+<table class="insights" id="access-keys-table">
+  <thead><tr><th>Key</th><th>Status</th><th>Created</th><th>Last used</th><th>Service / region</th></tr></thead>
+  <tbody>
+  {% for k in entity.access_keys %}
+    <tr><td class="mono" title="access key id ending in {{ k.key_id[-4:] }}">{{ mask_key(k.key_id) }}</td>
+      <td><span class="badge {{ 'ok' if k.status == 'Active' else '' }}">{{ k.status }}</span></td>
+      <td>{{ k.create_date | localtime }}</td>
+      <td>{% if not k.last_used_known %}<span class="muted">unknown</span>{% elif k.last_used_at %}{{ k.last_used_at | localtime }}{% else %}<span class="badge warn">never</span>{% endif %}</td>
+      <td class="small">{{ k.last_used_service }}{% if k.last_used_region %} · {{ k.last_used_region }}{% endif %}</td></tr>
+  {% else %}
+    <tr><td colspan="5" class="muted">No access keys.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>{{ 'Own policies' if ptype == 'user' else 'Policies' }} ({{ entity.policies | length }})</h2>
+{% for p in entity.policies %}{{ policy_card(p) }}{% else %}<p class="muted">No policies attached{% if ptype == 'user' %} to the user itself{% endif %}.</p>{% endfor %}
+{% if ptype == 'user' %}
+{% set via = entity.groups | map(attribute='policies') | map('length') | sum %}
+<h2>Policies via groups ({{ via }})</h2>
+{% for g in entity.groups %}{% for p in g.policies %}{{ policy_card(p, g.group_name) }}{% endfor %}{% endfor %}
+{% if not via %}<p class="muted">No group policies.</p>{% endif %}
+{% endif %}
+</div>
+
+<div id="identity-insights" data-refresh>
+<h2 id="findings">Risk findings ({{ info.findings | length }}){% if info.score %} <span class="muted small">score {{ info.score }}</span>{% endif %}</h2>
+{{ finding_list(info.findings) }}
+
+<h2 id="effective">Effective permissions ({{ info.actions | length }} action{{ '' if info.actions | length == 1 else 's' }})</h2>
+<p class="muted small">Union of every policy{% if ptype == 'user' %} of the user and of its groups{% endif %}, wildcards expanded
+  against the built-in action catalog. Unconditional Deny on "*" is subtracted; permissions boundaries and narrower Deny
+  statements are not evaluated.</p>
+<details class="card"><summary>{{ info.permissions | length }} grant{{ '' if info.permissions | length == 1 else 's' }} (action × resource × condition)</summary>
+<table class="insights" id="effective-permissions">
+  <thead><tr><th>Action</th><th>Resource</th><th>Condition</th><th>From</th></tr></thead>
+  <tbody>
+  {% for p in info.permissions %}
+    <tr><td class="mono small">{{ p.action }}</td><td class="mono small">{{ p.resource }}</td>
+      <td class="mono small">{{ p.condition }}</td><td class="small">{{ p.policies | join(', ') }}</td></tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">No permissions.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</details>
+</div>
+{% endblock %}
+{% block scripts %}
+{{ graph_scripts() }}
+<script src="{{ url_for('static', filename='copy.js') }}" defer></script>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const data = JSON.parse(document.getElementById("graph-data").textContent);
+  const graph = window.RoleGraph.mount(document.getElementById("cy"));
+  graph.setData(data);
+  document.addEventListener("rolelens:data-refreshed", function () {
+    fetch({{ url_for('user_graph' if ptype == 'user' else 'group_graph', name=name) | tojson }}, { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (fresh) { if (fresh) graph.setData(fresh); })
+      .catch(function () {});
+  });
+});
+</script>
+{% endblock %}

@@ -338,7 +338,8 @@ def test_cloudtrail_reads_the_account_region_and_us_east_1(db_path, snap):
         ("accessanalyzer", "ListAnalyzers", True),
         ("accessanalyzer", "ListFindings", True),
         ("accessanalyzer", "ListFindingsV2", True),
-        ("iam", "GenerateCredentialReport", False),
+        # allowlisted by name for the optional credential report (users)
+        ("iam", "GenerateCredentialReport", True),
         ("iam", "GenerateOrganizationsAccessReport", False),
         ("cloudtrail", "StopLogging", False),
         ("cloudtrail", "LookupSomethingElse", False),
@@ -357,4 +358,4 @@ def test_guard_still_refuses_writes_on_usage_clients():
     with pytest.raises(ReadOnlyViolation):
         gw.client("accessanalyzer").create_analyzer(analyzerName="analyzer-a", type="ACCOUNT")
     with pytest.raises(ReadOnlyViolation):
-        gw.client("iam").generate_credential_report()
+        gw.client("iam").create_access_key(UserName="user-a")

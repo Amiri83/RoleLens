@@ -73,7 +73,9 @@ CREATE TABLE IF NOT EXISTS role_policies (
     PRIMARY KEY (snapshot_id, role_name, kind, policy_name)
 );
 
--- iam:GetPolicy + iam:GetPolicyVersion (default version) of every attached managed policy.
+-- iam:GetPolicy + iam:GetPolicyVersion (default version) of every customer managed policy
+-- (iam:ListPolicies Scope=Local, attached or not) and every attached AWS managed policy.
+-- More columns are added by MIGRATIONS (description, dates, versions, ...).
 CREATE TABLE IF NOT EXISTS managed_policies (
     snapshot_id     INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
     arn             TEXT NOT NULL,
@@ -83,6 +85,81 @@ CREATE TABLE IF NOT EXISTS managed_policies (
     aws_managed     INTEGER NOT NULL DEFAULT 0,
     document        TEXT,           -- NULL when it could not be read
     PRIMARY KEY (snapshot_id, arn)
+);
+
+-- iam:ListUsers + iam:GetUser; console access and MFA from the credential report
+-- (iam:GetCredentialReport) or iam:GetLoginProfile (existence only) + iam:ListMFADevices.
+-- password_enabled / mfa_active are NULL when unknown (no permission).
+CREATE TABLE IF NOT EXISTS users (
+    snapshot_id          INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    user_name            TEXT NOT NULL,
+    user_id              TEXT NOT NULL DEFAULT '',
+    arn                  TEXT NOT NULL DEFAULT '',
+    path                 TEXT NOT NULL DEFAULT '/',
+    create_date          TEXT NOT NULL DEFAULT '',
+    permissions_boundary TEXT NOT NULL DEFAULT '',
+    password_enabled     INTEGER,
+    password_last_used   TEXT NOT NULL DEFAULT '',
+    mfa_active           INTEGER,
+    mfa_devices          INTEGER,        -- NULL when taken from the credential report
+    metadata_source      TEXT NOT NULL DEFAULT '',  -- report | api | '' (unknown)
+    PRIMARY KEY (snapshot_id, user_name)
+);
+
+-- iam:ListAccessKeys + iam:GetAccessKeyLastUsed (or the credential report): the key id,
+-- its status, age and last use only. A secret access key is never requested or stored.
+CREATE TABLE IF NOT EXISTS user_access_keys (
+    snapshot_id       INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    user_name         TEXT NOT NULL,
+    key_id            TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT '',
+    create_date       TEXT NOT NULL DEFAULT '',
+    last_used_at      TEXT NOT NULL DEFAULT '',   -- '' never (or unknown, see last_used_known)
+    last_used_service TEXT NOT NULL DEFAULT '',
+    last_used_region  TEXT NOT NULL DEFAULT '',
+    last_used_known   INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (snapshot_id, user_name, key_id)
+);
+
+-- iam:ListGroups.
+CREATE TABLE IF NOT EXISTS iam_groups (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    group_name  TEXT NOT NULL,
+    group_id    TEXT NOT NULL DEFAULT '',
+    arn         TEXT NOT NULL DEFAULT '',
+    path        TEXT NOT NULL DEFAULT '/',
+    create_date TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (snapshot_id, group_name)
+);
+
+-- iam:GetGroup (members) and iam:ListGroupsForUser.
+CREATE TABLE IF NOT EXISTS group_members (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    group_name  TEXT NOT NULL,
+    user_name   TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, group_name, user_name)
+);
+
+-- Policies of a user or group, like role_policies. principal_type: user | group.
+-- kind: inline (List*Policies + Get*Policy, document set) | managed (ListAttached*Policies).
+CREATE TABLE IF NOT EXISTS identity_policies (
+    snapshot_id    INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    principal_type TEXT NOT NULL,
+    principal_name TEXT NOT NULL,
+    kind           TEXT NOT NULL,
+    policy_name    TEXT NOT NULL,
+    policy_arn     TEXT NOT NULL DEFAULT '',
+    document       TEXT,
+    PRIMARY KEY (snapshot_id, principal_type, principal_name, kind, policy_name)
+);
+
+-- iam:ListEntitiesForPolicy: who a managed policy is attached to (role | user | group).
+CREATE TABLE IF NOT EXISTS policy_entities (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    arn         TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_name TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, arn, entity_type, entity_name)
 );
 
 -- Insights of a snapshot (insights.py), computed from the collected policies: one row in
@@ -115,6 +192,32 @@ CREATE TABLE IF NOT EXISTS role_findings (
     fix         TEXT NOT NULL DEFAULT '',
     statements  TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (snapshot_id, role_name, rule, location)
+);
+
+-- Effective permissions and findings of users and groups (principal_type: user | group),
+-- same columns as role_permissions / role_findings. A user's grants include the policies
+-- of its groups.
+CREATE TABLE IF NOT EXISTS identity_permissions (
+    snapshot_id    INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    principal_type TEXT NOT NULL,
+    principal_name TEXT NOT NULL,
+    action         TEXT NOT NULL,
+    resource       TEXT NOT NULL,
+    condition      TEXT NOT NULL DEFAULT '',
+    policies       TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (snapshot_id, principal_type, principal_name, action, resource, condition)
+);
+CREATE TABLE IF NOT EXISTS identity_findings (
+    snapshot_id    INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+    principal_type TEXT NOT NULL,
+    principal_name TEXT NOT NULL,
+    rule           TEXT NOT NULL,
+    severity       TEXT NOT NULL,
+    location       TEXT NOT NULL DEFAULT '',
+    why            TEXT NOT NULL DEFAULT '',
+    fix            TEXT NOT NULL DEFAULT '',
+    statements     TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (snapshot_id, principal_type, principal_name, rule, location)
 );
 
 -- Usage data of a snapshot (usage.py), every source optional. sources: JSON
@@ -166,8 +269,9 @@ CREATE TABLE IF NOT EXISTS analyzer_findings (
     PRIMARY KEY (snapshot_id, analyzer, finding_id)
 );
 
--- Local drafts cloned from a collected role. Never written to AWS. original / model are JSON
--- role models (see drafts.py): original is frozen at clone time for the diff.
+-- Local drafts cloned from a collected role, user or managed policy (entity, a MIGRATIONS
+-- column). Never written to AWS. original / model are JSON models (see drafts.py):
+-- original is frozen at clone time for the diff.
 CREATE TABLE IF NOT EXISTS drafts (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     account_ref INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
@@ -201,6 +305,19 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS ix_jobs_account ON jobs(account_ref, started_at);
 """
 
+# Columns added after a table was first released: CREATE TABLE IF NOT EXISTS leaves an
+# existing table alone, so init_db adds the missing ones.
+MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "managed_policies": [
+        ("description", "TEXT NOT NULL DEFAULT ''"),
+        ("create_date", "TEXT NOT NULL DEFAULT ''"),
+        ("update_date", "TEXT NOT NULL DEFAULT ''"),
+        ("attachment_count", "INTEGER"),  # iam:GetPolicy AttachmentCount (NULL unknown)
+        ("versions", "TEXT NOT NULL DEFAULT '[]'"),  # iam:ListPolicyVersions (JSON list)
+    ],
+    "drafts": [("entity", "TEXT NOT NULL DEFAULT 'role'")],  # role | user | policy
+}
+
 # Seconds a connection waits for another thread's write lock before failing.
 BUSY_TIMEOUT = 30.0
 ACTIVE_ACCOUNT_KEY = "active_account"
@@ -220,6 +337,11 @@ def init_db(db_path: Path | str) -> None:
         # WAL: readers (page requests) are not blocked while a background job writes.
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
+        for table, columns in MIGRATIONS.items():
+            have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}  # noqa: S608
+            for name, decl in columns:
+                if name not in have:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 @contextmanager

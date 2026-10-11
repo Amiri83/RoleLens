@@ -1,9 +1,11 @@
-/* RoleLens draft editor: role settings, one JSON editor per document (trust policy and
-   each permission policy), live validation, live graph and diff against the collected
-   role. Every change is sent (debounced) to /drafts/<id>/preview, which parses and
-   validates the draft and returns the issues, the graph and the diff; nothing is stored
-   until Save. AWS managed policies are read-only (they can be removed, not edited).
-   RoleLens never writes drafts to AWS. */
+/* RoleLens draft editor: settings, one JSON editor per document, live validation, live
+   graph and diff against the collected original. A draft is a role (trust policy and each
+   permission policy), a user (its own policies; groups as a comma-separated field) or a
+   standalone managed policy (one document), see #editor-config data-entity. Every change
+   is sent (debounced) to /drafts/<id>/preview, which parses and validates the draft and
+   returns the issues, the graph and the diff; nothing is stored until Save. AWS managed
+   policies are read-only (they can be removed, not edited). RoleLens never writes drafts
+   to AWS. */
 (function () {
   "use strict";
 
@@ -29,20 +31,38 @@
   const form = $("save-form");
 
   const pretty = (doc) => JSON.stringify(doc ?? {}, null, 2);
+  const docText = (doc) => (doc === null || doc === undefined ? "" : pretty(doc));
+  const entity = cfg.entity || "role";
   const model = data.model;
   const meta = {};
+  const lists = new Set();  // fields edited as comma-separated lists (user groups)
   document.querySelectorAll("#role-fields [data-field]").forEach((input) => {
     const field = input.dataset.field;
-    input.value = model[field] ?? "";
+    const value = model[field];
+    if (input.hasAttribute("data-list")) lists.add(field);
+    input.value = Array.isArray(value) ? value.join(", ") : value ?? "";
     meta[field] = input.value;
-    input.addEventListener("input", () => { meta[field] = input.value; changed(); });
+    input.addEventListener("input", () => {
+      meta[field] = input.value;
+      if (entity === "policy" && field === "name" && docs.length) docs[0].name = input.value;
+      changed();
+    });
   });
-  const docs = [{ kind: "trust", name: "Trust policy", text: pretty(model.trust) }].concat(
-    (model.policies || []).map((p) => ({
-      kind: p.kind || "inline", name: p.name || "", arn: p.arn || "", path: p.path || "",
-      text: p.document === null || p.document === undefined ? "" : pretty(p.document),
-    }))
-  );
+  const policyDocs = (model.policies || []).map((p) => ({
+    kind: p.kind || "inline", name: p.name || "", arn: p.arn || "", path: p.path || "",
+    text: docText(p.document),
+  }));
+  let docs;
+  if (entity === "policy") {
+    docs = [{ kind: "managed", name: model.name || "", arn: model.arn || "", path: model.path || "",
+              text: docText(model.document), standalone: true }];
+  } else if (entity === "user") {
+    docs = policyDocs;
+  } else {
+    docs = [{ kind: "trust", name: "Trust policy", text: pretty(model.trust) }].concat(policyDocs);
+  }
+  // Index of the first permission policy in docs (the server numbers policies from 0).
+  const first = entity === "role" ? 1 : 0;
   let current = 0;
   let dirty = false;
   let timer = null;
@@ -51,14 +71,35 @@
 
   const graph = window.RoleGraph.mount($("cy"));
   const editor = window.JsonEdit.attach($("doc-editor"), {
-    onChange(text) { docs[current].text = text; changed(); },
+    onChange(text) { if (docs[current]) { docs[current].text = text; changed(); } },
   });
 
   function where(doc, index) {
-    return doc.kind === "trust" ? "trust" : `policy:${doc.name || index - 1}`;
+    return doc.kind === "trust" ? "trust" : `policy:${doc.name || index - first}`;
+  }
+
+  function listValue(text) {
+    return String(text || "").split(",").map((s) => s.trim()).filter(Boolean);
   }
 
   function serialize() {
+    const policies = docs.slice(first).map((d) => ({
+      name: d.name, kind: d.kind, arn: d.arn, path: d.path,
+      document: d.kind === "aws" ? null : d.text,
+    }));
+    if (entity === "policy") {
+      return {
+        entity, name: meta.name || "", path: meta.path || "", description: meta.description || "",
+        document: docs[0].text,
+      };
+    }
+    if (entity === "user") {
+      return {
+        entity, user_name: meta.user_name || "", path: meta.path || "",
+        permissions_boundary: meta.permissions_boundary || "",
+        groups: listValue(meta.groups), policies,
+      };
+    }
     const session = Number(meta.max_session_duration);
     return {
       role_name: meta.role_name || "",
@@ -67,10 +108,7 @@
       max_session_duration: Number.isInteger(session) ? session : meta.max_session_duration,
       permissions_boundary: meta.permissions_boundary || "",
       trust: docs[0].text,
-      policies: docs.slice(1).map((d) => ({
-        name: d.name, kind: d.kind, arn: d.arn, path: d.path,
-        document: d.kind === "aws" ? null : d.text,
-      })),
+      policies,
     };
   }
 
@@ -84,7 +122,7 @@
       const o = document.createElement("option");
       o.value = String(i);
       const errors = issueCount(d, i);
-      o.textContent = (i === 0 ? "Trust policy" : `${d.name || "(unnamed)"} · ${KIND_LABELS[d.kind] || d.kind}`) +
+      o.textContent = (d.kind === "trust" ? "Trust policy" : `${d.name || "(unnamed)"} · ${KIND_LABELS[d.kind] || d.kind}`) +
         (errors ? ` (${errors} error${errors === 1 ? "" : "s"})` : "");
       return o;
     }));
@@ -94,20 +132,30 @@
   function show(index) {
     current = Math.max(0, Math.min(index, docs.length - 1));
     const doc = docs[current];
+    const remove = $("doc-remove");
+    if (!doc) {  // a user draft without policies of its own
+      editor.setValue("// no policies: add an inline policy");
+      editor.setReadOnly(true);
+      $("doc-meta").hidden = true;
+      if (remove) remove.disabled = true;
+      renderSelect();
+      return;
+    }
     editor.setValue(doc.kind === "aws" && !doc.text ? "// document not readable" : doc.text);
     editor.setReadOnly(doc.kind === "aws");
-    $("doc-meta").hidden = current === 0;
+    $("doc-meta").hidden = doc.kind === "trust" || Boolean(doc.standalone);
     nameInput.value = doc.name;
     nameInput.readOnly = doc.kind !== "inline";
-    kindLabel.textContent = current === 0 ? "" :
+    kindLabel.textContent = doc.kind === "trust" ? "" :
       KIND_LABELS[doc.kind] + (doc.kind === "aws" ? " (read-only; remove it to detach)" : "") +
       (doc.arn ? ` · ${doc.arn}` : "");
-    $("doc-remove").disabled = current === 0;
+    if (remove) remove.disabled = doc.kind === "trust";
     renderSelect();
     markErrorLine();
   }
 
   function markErrorLine() {
+    if (!docs[current]) return;
     const w = where(docs[current], current);
     const hit = lastIssues.find((i) => i.where === w && /line (\d+)/.test(i.message));
     editor.markError(hit ? Number(hit.message.match(/line (\d+)/)[1]) : 0);
@@ -200,16 +248,16 @@
 
   select.addEventListener("change", () => show(Number(select.value)));
   nameInput.addEventListener("input", () => {
-    if (current === 0 || docs[current].kind !== "inline") return;
+    if (!docs[current] || docs[current].kind !== "inline") return;
     docs[current].name = nameInput.value;
     renderSelect();
     changed();
   });
   $("doc-format").addEventListener("click", () => {
-    if (docs[current].kind === "aws") return;
+    if (!docs[current] || docs[current].kind === "aws") return;
     if (!editor.format()) saveState.textContent = "cannot format: the JSON has a syntax error";
   });
-  $("doc-add").addEventListener("click", () => {
+  if ($("doc-add")) $("doc-add").addEventListener("click", () => {
     const taken = new Set(docs.map((d) => d.name));
     let name = "inline-policy";
     for (let n = 2; taken.has(name); n += 1) name = `inline-policy-${n}`;
@@ -219,9 +267,9 @@
     nameInput.focus();
     nameInput.select();
   });
-  $("doc-remove").addEventListener("click", () => {
-    if (current === 0) return;
+  if ($("doc-remove")) $("doc-remove").addEventListener("click", () => {
     const d = docs[current];
+    if (!d || d.kind === "trust") return;
     const verb = d.kind === "inline" ? "Delete the inline policy" : "Detach the policy";
     if (!window.confirm(`${verb} ${d.name} from this draft?`)) return;
     docs.splice(current, 1);

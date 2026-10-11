@@ -98,6 +98,47 @@
   </section>
 </div>
 
+{% set ids = d.identities %}
+<h2 id="identities">Users and groups <span class="muted small">({{ ids.total_users }} users, {{ ids.total_groups }} groups)</span></h2>
+<p class="muted small">The same permission rules, applied to each user's own policies plus those of its groups, and to
+  each group; plus console MFA, access key age and use, and direct attachments.</p>
+<div class="insight-grid">
+  <section>
+    <table class="insights" id="identity-rule-counts">
+      <thead><tr><th>Finding</th><th>Severity</th><th>Users</th><th>Groups</th><th></th></tr></thead>
+      <tbody>
+      {% for r in ids.rules %}
+        <tr>
+          <td><b>{{ r.title }}</b><div class="muted small">{{ r.summary }}</div></td>
+          <td>{% if r.findings %}{{ severity(r.severity) }}{% else %}<span class="muted">–</span>{% endif %}</td>
+          <td>{{ r.users if 'user' in r.applies else '–' }}</td>
+          <td>{{ r.groups if 'group' in r.applies else '–' }}</td>
+          <td>{% if r.users %}<a class="btn secondary" href="{{ url_for('users', finding=r.rule) }}">Show users</a>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  <section>
+    <h3>Top risky users and groups</h3>
+    <table class="insights" id="risky-identities">
+      <thead><tr><th>Name</th><th>Score</th><th>Worst</th><th>Findings</th></tr></thead>
+      <tbody>
+      {% for r in ids.risky %}
+        <tr>
+          <td><a href="{{ url_for('user_page' if r.type == 'user' else 'group_page', name=r.name) }}#findings"><b>{{ r.name }}</b></a> <span class="badge">{{ r.type }}</span></td>
+          <td>{{ r.score }}</td>
+          <td>{{ severity(r.worst) }}</td>
+          <td class="small">{{ r.findings }} · {{ r.rules | join(', ') }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="4" class="muted">No findings.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+
 <h2>Usage data</h2>
 {% if d.usage %}
 <div class="card">

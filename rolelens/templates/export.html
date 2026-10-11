@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Export {{ draft.model.role_name }}{% endblock %}
+{% block title %}Export {{ draft.name }}{% endblock %}
 {% block content %}
 <p><a href="{{ url_for('draft_edit', draft_id=draft.id) }}" class="back-link">← Draft #{{ draft.id }}</a></p>
-<h1>Export: {{ draft.model.role_name }}</h1>
+<h1>Export: {{ draft.name }}{% if draft.entity != 'role' %} <span class="badge">{{ 'managed policy' if draft.entity == 'policy' else draft.entity }}</span>{% endif %}</h1>
 <p class="muted">Generated locally from the saved draft. RoleLens never applies anything: review the output and
   run <span class="mono">terraform plan</span> yourself.</p>
 {% if has_errors %}
@@ -20,9 +20,18 @@
       <a class="btn" href="{{ url_for('draft_export_tf', draft_id=draft.id) }}">Download .tf</a>
     </div>
   </div>
+  {% if draft.entity == 'user' %}
+  <p class="muted small"><span class="mono">aws_iam_user</span>, <span class="mono">aws_iam_user_policy</span> (inline),
+    <span class="mono">aws_iam_policy</span> + <span class="mono">aws_iam_user_policy_attachment</span> (customer managed),
+    attachments by ARN (AWS managed) and <span class="mono">aws_iam_user_group_membership</span>. Access keys and console
+    passwords are never exported.</p>
+  {% elif draft.entity == 'policy' %}
+  <p class="muted small"><span class="mono">aws_iam_policy</span> with an <span class="mono">aws_iam_policy_document</span> data source.</p>
+  {% else %}
   <p class="muted small"><span class="mono">aws_iam_role</span> with <span class="mono">aws_iam_policy_document</span>
     data sources, <span class="mono">aws_iam_role_policy</span> (inline), <span class="mono">aws_iam_policy</span> +
     <span class="mono">aws_iam_role_policy_attachment</span> (customer managed) and attachments by ARN (AWS managed).</p>
+  {% endif %}
   <pre class="code" id="hcl">{{ hcl }}</pre>
 </section>
 

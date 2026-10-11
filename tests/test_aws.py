@@ -54,10 +54,22 @@ def test_read_only_guard_allows_paginators():
         ("iam", "GetPolicyVersion", True),
         ("iam", "CreateRole", False),
         ("iam", "AttachRolePolicy", False),
-        ("iam", "GetCredentialReport", False),
+        # the credential report: an optional, allowlisted source of user metadata
+        ("iam", "GenerateCredentialReport", True),
+        ("iam", "GetCredentialReport", True),
+        # ... while user writes and every other secret-returning call stay refused
+        ("iam", "CreateAccessKey", False),
+        ("iam", "CreateLoginProfile", False),
+        ("iam", "UpdateAccessKey", False),
+        ("iam", "GenerateOrganizationsAccessReport", False),
         ("sts", "AssumeRole", False),
         ("sts", "GetSessionToken", False),
+        ("sts", "GetFederationToken", False),
         ("secretsmanager", "GetSecretValue", False),
+        ("secretsmanager", "BatchGetSecretValue", False),
+        ("ssm", "GetParameter", False),
+        ("ssm", "GetParametersByPath", False),
+        ("ecr", "GetAuthorizationToken", False),
     ],
 )
 def test_is_read_only_operation(service, op, allowed):
