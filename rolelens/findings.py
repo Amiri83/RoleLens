@@ -1,8 +1,12 @@
-"""Risk findings of a role: each with a severity, why it matters and a suggested fix.
+"""Risk findings of a role, user or group: each with a severity, why it matters and a
+suggested fix.
 
-Rules (:data:`RULES`) look at the collected trust and permission policies only; they
-never call AWS. A rule reports at most one finding per policy (or per trust policy),
-listing every statement it matched, so the counts stay readable.
+Rules (:data:`RULES`) look at the collected policies and user metadata only; they never
+call AWS. A rule reports at most one finding per policy (or per trust policy, or access
+key), listing every statement it matched, so the counts stay readable. The permission
+policy rules (admin, wildcard, passrole) apply to roles, users (their own policies and
+those of their groups) and groups alike; :data:`Rule.applies` says which principals a
+rule is checked for.
 
 Severities: ``critical`` > ``high`` > ``medium`` > ``low``. A statement with a
 ``Condition`` is reported one level lower (the condition may already narrow it).
@@ -13,6 +17,7 @@ from __future__ import annotations
 import fnmatch
 import json
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
 from .policy import as_list, principal_account, role_account, statements, trust_principals
@@ -22,12 +27,17 @@ SEVERITY_WEIGHT = {"critical": 10, "high": 5, "medium": 2, "low": 1}
 SERVICE_LINKED_PATH = "/aws-service-role/"
 ADMIN_POLICY_SUFFIX = ":policy/AdministratorAccess"
 ACCOUNT_PLACEHOLDER = "<account-id>"
+# Access keys older than this, or unused for longer, are reported (CIS: 90 days).
+KEY_MAX_AGE_DAYS = 90
+KEY_UNUSED_DAYS = 90
+PRINCIPALS = ("role", "user", "group")
 
 
 class Rule(NamedTuple):
     title: str
     severity: str  # default severity (some findings raise or lower it)
     summary: str
+    applies: tuple[str, ...] = PRINCIPALS  # principal types the rule is checked for
 
 
 RULES: dict[str, Rule] = {
@@ -50,36 +60,69 @@ RULES: dict[str, Rule] = {
         "Cross-account trust without ExternalId",
         "high",
         "Another account (or anyone) may assume the role without an sts:ExternalId condition.",
+        ("role",),
     ),
     "root-trust": Rule(
         "Trust to another account's root",
         "medium",
         "The trust policy names the root of another account.",
+        ("role",),
     ),
     "oidc-no-sub": Rule(
         "OIDC trust without a sub condition",
         "high",
         "A web identity (OIDC) provider may assume the role without a condition on :sub.",
+        ("role",),
     ),
     "no-boundary": Rule(
         "No permissions boundary",
         "low",
-        "The role has no permissions boundary.",
+        "The role or user has no permissions boundary.",
+        ("role", "user"),
     ),
     "inline-only": Rule(
         "Only inline policies",
         "low",
-        "Every policy of the role is inline.",
+        "Every policy of the role, user or group is inline.",
+    ),
+    "no-mfa": Rule(
+        "Console access without MFA",
+        "high",
+        "The user can sign in to the console with a password but has no MFA device.",
+        ("user",),
+    ),
+    "old-access-key": Rule(
+        "Old access key",
+        "medium",
+        f"An active access key is older than {KEY_MAX_AGE_DAYS} days (not rotated).",
+        ("user",),
+    ),
+    "unused-access-key": Rule(
+        "Unused access key",
+        "medium",
+        f"An active access key was not used in the last {KEY_UNUSED_DAYS} days.",
+        ("user",),
+    ),
+    "direct-attachment": Rule(
+        "Policies attached to the user",
+        "low",
+        "The user has policies of its own instead of getting them from a group.",
+        ("user",),
     ),
 }
+
+
+def rules_for(principal: str) -> dict[str, Rule]:
+    """The rules checked for a principal type (role, user or group)."""
+    return {k: r for k, r in RULES.items() if principal in r.applies}
 
 
 @dataclass
 class Finding:
     rule: str
     severity: str
-    role: str
-    where: str  # "policy <name>", "trust policy", "role"
+    role: str  # the principal's name (role, user or group)
+    where: str  # "policy <name>", "trust policy", "role", "user", "access key …ABCD"
     why: str
     fix: str  # suggested snippet (JSON or HCL)
     statements: list[str] = field(default_factory=list)  # "#0 (Sid)" of matched statements
@@ -161,7 +204,7 @@ def _admin(st: dict[str, Any], actions: list[str], resources: list[str]) -> tupl
     for a in actions:
         if a.lower() == "iam:*":
             return "critical", (
-                "iam:* lets the role create or change any policy and role, so it can grant "
+                "iam:* allows creating or changing any policy, role and user, so it can grant "
                 "itself any permission (privilege escalation to full admin)."
             )
     if "*" in resources:
@@ -279,7 +322,7 @@ def _policy_rules(c: _Collector, policy: dict[str, Any], account: str) -> None:
                 "passrole",
                 "medium" if conditional else "high",
                 where,
-                'iam:PassRole on Resource "*" lets the role hand any role (including admin '
+                'iam:PassRole on Resource "*" allows handing any role (including admin '
                 "roles) to a service it can configure: privilege escalation.",
                 _pretty(fix),
                 label,
@@ -391,37 +434,228 @@ def role_findings(model: dict[str, Any], own_account: str | None = None) -> list
     _trust_rules(c, model.get("trust"), own)
 
     service_linked = (model.get("path") or "").startswith(SERVICE_LINKED_PATH)
-    if not service_linked and not model.get("permissions_boundary"):
-        c.add(
-            "no-boundary",
-            "low",
-            "role",
-            "Without a permissions boundary nothing caps what the role's policies may grant, "
-            "including policies added later.",
-            f'resource "aws_iam_role" "{name}" {{\n'
-            "  # ...\n"
-            f'  permissions_boundary = "arn:aws:iam::{account}:policy/<boundary-policy>"\n'
-            "}",
-        )
-    policies = model.get("policies") or []
-    if policies and all(p.get("kind") == "inline" for p in policies) and not service_linked:
-        first = policies[0].get("name", "policy")
-        c.add(
-            "inline-only",
-            "low",
-            "role",
-            "Inline policies cannot be reused, versioned or attached elsewhere, and are easy "
-            "to miss in reviews; prefer customer managed policies.",
-            f'resource "aws_iam_policy" "{first}" {{\n'
-            f'  name   = "{first}"\n'
-            "  policy = data.aws_iam_policy_document.<document>.json\n"
-            "}\n\n"
-            f'resource "aws_iam_role_policy_attachment" "{name}_{first}" {{\n'
-            f'  role       = "{name}"\n'
-            f"  policy_arn = aws_iam_policy.{first}.arn\n"
-            "}",
-        )
+    if not service_linked:
+        _boundary_rule(c, "role", name, model, account)
+        _inline_only_rule(c, "role", name, model.get("policies") or [])
+    return _sorted(c)
+
+
+def _sorted(c: _Collector) -> list[Finding]:
     return sorted(c.found.values(), key=lambda f: (SEVERITIES.index(f.severity), f.rule, f.where))
+
+
+def _boundary_rule(
+    c: _Collector, ptype: str, name: str, model: dict[str, Any], account: str
+) -> None:
+    if model.get("permissions_boundary"):
+        return
+    c.add(
+        "no-boundary",
+        "low",
+        ptype,
+        f"Without a permissions boundary nothing caps what the {ptype}'s policies may grant, "
+        "including policies added later.",
+        f'resource "aws_iam_{ptype}" "{name}" {{\n'
+        "  # ...\n"
+        f'  permissions_boundary = "arn:aws:iam::{account}:policy/<boundary-policy>"\n'
+        "}",
+    )
+
+
+def _inline_only_rule(c: _Collector, ptype: str, name: str, policies: list[dict[str, Any]]) -> None:
+    if not policies or any(p.get("kind") != "inline" for p in policies):
+        return
+    first = policies[0].get("name", "policy")
+    c.add(
+        "inline-only",
+        "low",
+        ptype,
+        "Inline policies cannot be reused, versioned or attached elsewhere, and are easy "
+        "to miss in reviews; prefer customer managed policies.",
+        f'resource "aws_iam_policy" "{first}" {{\n'
+        f'  name   = "{first}"\n'
+        "  policy = data.aws_iam_policy_document.<document>.json\n"
+        "}\n\n"
+        f'resource "aws_iam_{ptype}_policy_attachment" "{name}_{first}" {{\n'
+        f'  {ptype.ljust(10)} = "{name}"\n'
+        f"  policy_arn = aws_iam_policy.{first}.arn\n"
+        "}",
+    )
+
+
+# -- users and groups ----------------------------------------------------------------
+
+
+def _days(value: str, now: datetime) -> int | None:
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return max(0, (now - ts).days)
+
+
+def mask_key(key_id: str) -> str:
+    """``…ABCD``: enough of an access key id to tell a user's keys apart."""
+    return f"…{key_id[-4:]}" if key_id else "(unknown)"
+
+
+_MFA_POLICY = {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "DenyAllWithoutMFA",
+            "Effect": "Deny",
+            "NotAction": [
+                "iam:CreateVirtualMFADevice",
+                "iam:EnableMFADevice",
+                "iam:GetUser",
+                "iam:ListMFADevices",
+                "iam:ListVirtualMFADevices",
+                "iam:ResyncMFADevice",
+                "sts:GetSessionToken",
+            ],
+            "Resource": "*",
+            "Condition": {"BoolIfExists": {"aws:MultiFactorAuthPresent": "false"}},
+        }
+    ],
+}
+
+
+def _key_rules(c: _Collector, name: str, keys: list[dict[str, Any]], now: datetime) -> None:
+    for k in keys:
+        if k.get("status") != "Active":
+            continue
+        where = f"access key {mask_key(k.get('key_id', ''))}"
+        key_ref = "<access-key-id>"
+        age = _days(k.get("create_date", ""), now)
+        if age is not None and age > KEY_MAX_AGE_DAYS:
+            c.add(
+                "old-access-key",
+                "medium",
+                where,
+                f"The key was created {age} days ago (more than {KEY_MAX_AGE_DAYS}): long-lived "
+                "keys are more likely to have leaked (code, CI logs, laptops). Rotate it, or "
+                "replace it with temporary credentials (a role, IAM Identity Center).",
+                f"aws iam create-access-key --user-name {name}\n"
+                "# switch every client to the new key, then:\n"
+                f"aws iam update-access-key --user-name {name} --access-key-id {key_ref} "
+                "--status Inactive\n"
+                f"aws iam delete-access-key --user-name {name} --access-key-id {key_ref}",
+            )
+        if not k.get("last_used_known", True):
+            continue
+        used = k.get("last_used_at", "")
+        idle = _days(used or k.get("create_date", ""), now)
+        if idle is not None and idle > KEY_UNUSED_DAYS:
+            since = (
+                f"last used {idle} days ago" if used else f"never used (created {idle} days ago)"
+            )
+            c.add(
+                "unused-access-key",
+                "medium",
+                where,
+                f"The key is active but {since}: an unused key is pure risk. Deactivate it, "
+                "then delete it once nothing breaks.",
+                f"aws iam update-access-key --user-name {name} --access-key-id {key_ref} "
+                "--status Inactive\n"
+                f"aws iam delete-access-key --user-name {name} --access-key-id {key_ref}",
+            )
+
+
+def user_findings(
+    model: dict[str, Any], own_account: str | None = None, now: datetime | None = None
+) -> list[Finding]:
+    """Every finding of a user model (see :mod:`rolelens.queries`): the permission policy
+    rules over its own policies and those of its groups (:func:`queries.all_policies`
+    names), plus console MFA, access key age / use and direct attachments."""
+    from .queries import all_policies  # queries imports this module
+
+    now = now or datetime.now(UTC)
+    name = model.get("user_name", "")
+    own = own_account or role_account(model.get("arn", ""))
+    account = own or ACCOUNT_PLACEHOLDER
+    c = _Collector(name)
+    policies = all_policies(model)
+    for p in policies:
+        _policy_rules(c, p, account)
+    _boundary_rule(c, "user", name, model, account)
+    _inline_only_rule(c, "user", name, policies)
+
+    if model.get("password_enabled") and model.get("mfa_active") is False:
+        c.add(
+            "no-mfa",
+            "high",
+            "user",
+            "The user can sign in to the console with a password alone: a phished or reused "
+            "password is enough to get in. Enable an MFA device, and deny everything but MFA "
+            "setup until MFA is used.",
+            _pretty(_MFA_POLICY),
+        )
+    _key_rules(c, name, model.get("access_keys") or [], now)
+
+    direct = model.get("policies") or []
+    if direct:
+        group = "<group>"
+        lines = [
+            f'resource "aws_iam_group" "{group}" {{\n  name = "{group}"\n}}',
+        ]
+        for p in direct:
+            pname = p.get("name", "policy")
+            if p.get("kind") == "inline":
+                lines.append(
+                    f'resource "aws_iam_group_policy" "{pname}" {{\n'
+                    f'  name   = "{pname}"\n'
+                    f"  group  = aws_iam_group.{group}.name\n"
+                    "  policy = data.aws_iam_policy_document.<document>.json\n"
+                    "}"
+                )
+            else:
+                lines.append(
+                    f'resource "aws_iam_group_policy_attachment" "{pname}" {{\n'
+                    f"  group      = aws_iam_group.{group}.name\n"
+                    f'  policy_arn = "{p.get("arn", "")}"\n'
+                    "}"
+                )
+        lines.append(
+            f'resource "aws_iam_user_group_membership" "{name}" {{\n'
+            f'  user   = "{name}"\n'
+            f"  groups = [aws_iam_group.{group}.name]\n"
+            "}"
+        )
+        c.add(
+            "direct-attachment",
+            "low",
+            "user",
+            f"{len(direct)} polic{'y is' if len(direct) == 1 else 'ies are'} attached to the user "
+            "itself: per-user permissions drift apart and are hard to review. Attach them to a "
+            "group and add the user to it.",
+            "\n\n".join(lines),
+        )
+    return _sorted(c)
+
+
+def group_findings(model: dict[str, Any], own_account: str | None = None) -> list[Finding]:
+    """Every finding of a group model: the permission policy rules and inline-only."""
+    name = model.get("group_name", "")
+    own = own_account or role_account(model.get("arn", ""))
+    c = _Collector(name)
+    policies = model.get("policies") or []
+    for p in policies:
+        _policy_rules(c, p, own or ACCOUNT_PLACEHOLDER)
+    _inline_only_rule(c, "group", name, policies)
+    return _sorted(c)
+
+
+def policy_findings(policy: dict[str, Any], own_account: str | None = None) -> list[Finding]:
+    """The permission policy rules (admin, wildcard, passrole) of one managed policy."""
+    own = own_account or role_account(policy.get("arn", ""))
+    c = _Collector(policy.get("name", ""))
+    _policy_rules(c, policy, own or ACCOUNT_PLACEHOLDER)
+    return _sorted(c)
 
 
 def risk_score(findings: list[Any]) -> int:

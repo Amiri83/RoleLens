@@ -1,8 +1,9 @@
-"""IAM validation of draft roles: JSON syntax, policy grammar and known action names.
+"""IAM validation of drafts (roles, users, managed policies): JSON syntax, policy grammar
+and known action names.
 
 Every problem is an :class:`Issue` (``error`` or ``warning``) that names where it is
-(``trust``, ``policy:<name>`` or ``role``) and the JSON path inside that document, so
-the editor can list it next to the right document.
+(``trust``, ``policy:<name>``, ``role``, ``user`` or ``policy``) and the JSON path inside
+that document, so the editor can list it next to the right document.
 """
 
 from __future__ import annotations
@@ -38,8 +39,10 @@ POLICY_KINDS = ("inline", "managed", "aws")
 SIZE_LIMITS = {"trust": 2048, "inline": 10240, "managed": 6144, "aws": 6144}
 MAX_MANAGED_ATTACHED = 10
 MIN_SESSION, MAX_SESSION = 3600, 43200
+MAX_GROUPS_PER_USER = 10
 
-_ROLE_NAME_RX = re.compile(r"^[\w+=,.@-]{1,64}$")
+_ROLE_NAME_RX = re.compile(r"^[\w+=,.@-]{1,64}$")  # role and user names
+_GROUP_NAME_RX = re.compile(r"^[\w+=,.@-]{1,128}$")
 _POLICY_NAME_RX = re.compile(r"^[\w+=,.@-]{1,128}$")
 _PATH_RX = re.compile(r"^/(?:[\x21-\x7e]+/)?$")
 _SID_RX = re.compile(r"^[A-Za-z0-9]*$")
@@ -329,8 +332,27 @@ def validate_document(doc: Any, kind: str, where: str) -> list[Issue]:
     return _DocValidator(where, kind).run(doc)
 
 
+def _path_and_description(model: dict[str, Any], add: Any, description: bool = True) -> None:
+    path = model.get("path", "/")
+    if not isinstance(path, str) or len(path) > 512 or not _PATH_RX.match(path):
+        add("path", 'path must start and end with "/" (e.g. "/" or "/team-a/")')
+    if not description:
+        return
+    desc = model.get("description", "")
+    if not isinstance(desc, str) or len(desc) > 1000:
+        add("description", "description: at most 1000 characters")
+    elif any(ord(c) < 32 for c in desc):
+        add("description", "description must not contain control characters")
+
+
 def validate_model(model: dict[str, Any]) -> list[Issue]:
-    """Validate a whole draft role model (see :mod:`rolelens.drafts`)."""
+    """Validate a whole draft model (see :mod:`rolelens.drafts`): a role, a user or a
+    managed policy (``entity``)."""
+    entity = model.get("entity", "role")
+    if entity == "user":
+        return _validate_user(model)
+    if entity == "policy":
+        return _validate_policy(model)
     issues: list[Issue] = []
 
     def role_issue(path: str, message: str, level: str = ERROR) -> None:
@@ -339,20 +361,62 @@ def validate_model(model: dict[str, Any]) -> list[Issue]:
     name = model.get("role_name", "")
     if not isinstance(name, str) or not _ROLE_NAME_RX.match(name):
         role_issue("role_name", "role name: 1-64 characters of letters, digits and +=,.@_-")
-    path = model.get("path", "/")
-    if not isinstance(path, str) or len(path) > 512 or not _PATH_RX.match(path):
-        role_issue("path", 'path must start and end with "/" (e.g. "/" or "/team-a/")')
-    desc = model.get("description", "")
-    if not isinstance(desc, str) or len(desc) > 1000:
-        role_issue("description", "description: at most 1000 characters")
-    elif any(ord(c) < 32 for c in desc):
-        role_issue("description", "description must not contain control characters")
+    _path_and_description(model, role_issue)
     session = model.get("max_session_duration", MIN_SESSION)
     if not isinstance(session, int) or not MIN_SESSION <= session <= MAX_SESSION:
         role_issue("max_session_duration", f"session duration: {MIN_SESSION}-{MAX_SESSION} seconds")
 
     issues += validate_document(model.get("trust"), "trust", "trust")
+    issues += _validate_policies(model, role_issue)
+    return issues
 
+
+def _validate_user(model: dict[str, Any]) -> list[Issue]:
+    issues: list[Issue] = []
+
+    def user_issue(path: str, message: str, level: str = ERROR) -> None:
+        issues.append(Issue(level, "user", path, message))
+
+    name = model.get("user_name", "")
+    if not isinstance(name, str) or not _ROLE_NAME_RX.match(name):
+        user_issue("user_name", "user name: 1-64 characters of letters, digits and +=,.@_-")
+    _path_and_description(model, user_issue, description=False)
+    groups = model.get("groups") or []
+    if not isinstance(groups, list):
+        user_issue("groups", "groups must be a list of group names")
+    else:
+        for i, g in enumerate(groups):
+            if not isinstance(g, str) or not _GROUP_NAME_RX.match(g):
+                user_issue(
+                    f"groups[{i}]", "group name: 1-128 characters of letters, digits and +=,.@_-"
+                )
+        if len(groups) > MAX_GROUPS_PER_USER:
+            user_issue("groups", f"a user can be in at most {MAX_GROUPS_PER_USER} groups")
+    issues += _validate_policies(model, user_issue)
+    return issues
+
+
+def _validate_policy(model: dict[str, Any]) -> list[Issue]:
+    issues: list[Issue] = []
+    name = str(model.get("name", ""))
+    where = f"policy:{name or 0}"
+
+    def policy_issue(path: str, message: str, level: str = ERROR) -> None:
+        issues.append(Issue(level, "policy", path, message))
+
+    if not _POLICY_NAME_RX.match(name):
+        policy_issue("name", "policy name: 1-128 characters of letters, digits and +=,.@_-")
+    _path_and_description(model, policy_issue)
+    if model.get("document") is None:
+        issues.append(Issue(ERROR, where, "", "the policy document is missing"))
+    else:
+        issues += validate_document(model["document"], "managed", where)
+    return issues
+
+
+def _validate_policies(model: dict[str, Any], owner_issue: Any) -> list[Issue]:
+    """The ``policies`` of a role or user model."""
+    issues: list[Issue] = []
     seen: set[tuple[str, str]] = set()
     managed = 0
     for i, pol in enumerate(model.get("policies") or []):
@@ -376,7 +440,7 @@ def validate_model(model: dict[str, Any]) -> list[Issue]:
             continue
         issues += validate_document(pol["document"], kind, where)
     if managed > MAX_MANAGED_ATTACHED:
-        role_issue(
+        owner_issue(
             "policies",
             f"{managed} managed policies attached; the default IAM quota is {MAX_MANAGED_ATTACHED}",
             WARNING,

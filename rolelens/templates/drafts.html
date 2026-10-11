@@ -2,16 +2,17 @@
 {% block title %}Drafts{% endblock %}
 {% block content %}
 <h1>Drafts</h1>
-<p class="muted">Drafts are local copies of collected roles. Edit the trust and permission policies,
-  check them against IAM rules, compare with the original and export JSON or Terraform.
-  <b>RoleLens never writes a draft to AWS.</b> Clone a role from the <a href="{{ url_for('roles') }}">Roles</a> page.</p>
+<p class="muted">Drafts are local copies of collected roles, users and customer managed policies. Edit their
+  policies, check them against IAM rules, compare with the original and export JSON or Terraform.
+  <b>RoleLens never writes a draft to AWS.</b> Clone from the <a href="{{ url_for('roles') }}">Roles</a>,
+  <a href="{{ url_for('users') }}">Users</a> or <a href="{{ url_for('policies') }}">Policies</a> page.</p>
 <table class="drafts">
   <thead><tr><th>Draft</th><th>Cloned from</th><th>Validation</th><th>Changes</th><th>Updated</th><th></th></tr></thead>
   <tbody>
   {% for d in rows %}
     <tr>
-      <td><a href="{{ url_for('draft_edit', draft_id=d.id) }}"><b>{{ d.model.role_name }}</b></a> <span class="muted small">#{{ d.id }}</span></td>
-      <td class="mono">{{ d.source_role }}</td>
+      <td><a href="{{ url_for('draft_edit', draft_id=d.id) }}"><b>{{ d.name }}</b></a> <span class="muted small">#{{ d.id }}</span></td>
+      <td><span class="badge">{{ 'managed policy' if d.entity == 'policy' else d.entity }}</span> <span class="mono">{{ d.source_role }}</span></td>
       <td>{% if d.errors %}<span class="badge err">{{ d.errors }} error{{ '' if d.errors == 1 else 's' }}</span>{% else %}<span class="badge ok">valid</span>{% endif %}
         {% if d.warnings %}<span class="badge warn">{{ d.warnings }} warning{{ '' if d.warnings == 1 else 's' }}</span>{% endif %}</td>
       <td>{{ d.changed }} section{{ '' if d.changed == 1 else 's' }} changed</td>

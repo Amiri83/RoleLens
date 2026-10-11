@@ -1,6 +1,8 @@
-/* RoleLens role graph (cytoscape.js + dagre, both vendored).
-   principals -> role -> policies -> services -> actions -> resources, as built by
-   rolelens/graph.py. Allow edges are green, Deny edges red and thicker, statements with a
+/* RoleLens graphs (cytoscape.js + dagre, both vendored).
+   principals -> role -> policies -> services -> actions -> resources (and user -> groups
+   -> policies -> ..., or roles / users / groups -> a managed policy -> ...), as built by
+   rolelens/graph.py. Role, user, group and managed policy nodes carry the URL of their
+   page: the detail panel links to it. Allow edges are green, Deny edges red and thicker, statements with a
    Condition are dashed; nodes reached by both Allow and Deny are "mixed". Grid is the
    default layout; the choice is remembered in localStorage. Clicking a node shows its
    detail (the statements behind it) in the side panel. Each node carries its type icon
@@ -16,10 +18,13 @@
   "use strict";
 
   const LAYOUT_KEY = "rolelens-layout";
-  const RANK = { principal: 0, role: 1, policy: 2, service: 3, action: 4, resource: 5 };
+  const RANK = { principal: 0, role: 1, user: 1, group: 2, policy: 3, service: 4, action: 5, resource: 6 };
+  // IAM principals the graph is about: never hidden by the node-type filters.
+  const ENTITIES = new Set(["role", "user", "group"]);
+  const ENTITY_SELECTOR = ".role, .user, .group";
   const COLORS = {
     allow: "#2f8f4e", deny: "#c0392b", mixed: "#c27c0e", neutral: "#8a94a3",
-    role: "#2457c5", line: "#5b6573",
+    role: "#2457c5", user: "#0f766e", line: "#5b6573",
   };
   const ICON_SPACE = 16;  // room left of the label for the 12px type icon
 
@@ -55,6 +60,11 @@
       "background-color": COLORS.role, "color": "#fff", "font-weight": 700, "font-size": 13,
       "border-color": "#1b3f8f", "padding": "12px",
     } },
+    { selector: "node.user, node.group", style: {
+      "background-color": COLORS.user, "color": "#fff", "font-weight": 700, "font-size": 13,
+      "border-color": "#0b5752", "padding": "12px",
+    } },
+    { selector: "node.group", style: { "font-size": 12 } },
     { selector: "node.policy", style: { "shape": "rectangle", "border-color": "#8c4fff", "background-color": "#f7f3ff" } },
     { selector: "node.service", style: { "shape": "ellipse", "background-color": "#f6f7f9", "border-color": COLORS.role } },
     { selector: "node.action", style: { "shape": "round-tag", "font-size": 10 } },
@@ -92,7 +102,7 @@
       case "breadthfirst": {
         const roots = eles.nodes(".principal");
         return { ...common, name, directed: true, spacingFactor: 1.1,
-                 roots: roots.length ? roots : eles.nodes(".role") };
+                 roots: roots.length ? roots : eles.nodes(".role, .user") };
       }
       case "concentric":
         return { ...common, name, concentric: (n) => 10 - Math.abs(rank(n) - 1) * 2, levelWidth: () => 2,
@@ -142,8 +152,17 @@
     const d = node.data();
     const detail = d.detail || {};
     const head = el("h2", d.label);
-    head.append(" ", el("span", d.type + (d.effect && d.effect !== "role" ? " · " + d.effect : ""), "badge"));
+    const plain = !d.effect || d.effect === "role" || d.effect === "entity";
+    head.append(" ", el("span", d.type + (plain ? "" : " · " + d.effect), "badge"));
     panel.append(head);
+    if (d.url) {
+      // Click-through to the role / user / group / managed policy page.
+      const link = el("a", `Open ${d.type} page →`);
+      link.href = d.url;
+      const p = el("p");
+      p.append(link);
+      panel.append(p);
+    }
     const dl = el("dl");
     Object.entries(detail).forEach(([k, v]) => {
       if (k === "kind" || k === "statements" || v === "" || v === null || (Array.isArray(v) && !v.length)) return;
@@ -201,7 +220,7 @@
         cy.elements().removeClass("hidden");
         cy.nodes().forEach((n) => {
           const type = n.data("type");
-          if (type !== "role" && typeBoxes.length && !shown.has(type)) n.addClass("hidden");
+          if (!ENTITIES.has(type) && typeBoxes.length && !shown.has(type)) n.addClass("hidden");
         });
         if (!effect) return;
         cy.edges().forEach((e) => {
@@ -210,7 +229,7 @@
         });
         cy.nodes().forEach((n) => {
           const type = n.data("type");
-          if (type === "role" || type === "policy") return;
+          if (ENTITIES.has(type) || type === "policy") return;
           if (n.connectedEdges().every((e) => e.hasClass("hidden"))) n.addClass("hidden");
         });
       });
@@ -218,7 +237,7 @@
 
     // What is on screen, for the server-side SVG / draw.io renderers.
     function exportView() {
-      const role = cy.nodes(".role");
+      const role = cy.nodes(ENTITY_SELECTOR).first();
       const nodes = cy.nodes().filter((n) => n.visible()).map((n) => ({
         id: n.id(), label: n.data("label"), type: n.data("type"), effect: n.data("effect"),
         x: n.position("x"), y: n.position("y"), w: n.outerWidth(), h: n.outerHeight(),
@@ -294,7 +313,10 @@
         else { renderDetail(panel, null); }
         if (stats && graph.stats) {
           const s = graph.stats;
-          stats.textContent = `${s.principals} principals · ${s.policies} policies · ${s.services} services · ` +
+          const who = [s.users && `${s.users} user${s.users === 1 ? "" : "s"}`,
+            s.groups && `${s.groups} group${s.groups === 1 ? "" : "s"}`].filter(Boolean);
+          stats.textContent = who.map((w) => w + " · ").join("") +
+            `${s.principals} principals · ${s.policies} policies · ${s.services} services · ` +
             `${s.actions} actions · ${s.resources} resources · ${s.deny_edges} deny edges` +
             (s.truncated ? ` · ${s.truncated} left out (too large)` : "");
         }

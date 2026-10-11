@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% from "_macros.html" import no_data with context %}
+{% block title %}Policies{% endblock %}
+{% macro choice(name, label, options, value) -%}
+  <select name="{{ name }}" form="policy-filters" aria-label="{{ label }}" title="{{ label }}">
+    <option value="">{{ label }}: any</option>
+    {% for key, text in options.items() %}<option value="{{ key }}" {{ 'selected' if key == value }}>{{ text }}</option>{% endfor %}
+  </select>
+{%- endmacro %}
+{% macro names(endpoint, items) -%}
+  {% for n in items[:5] %}<a href="{{ url_for(endpoint, name=n) }}" class="tag">{{ n }}</a> {% endfor %}
+  {% if items | length > 5 %}<span class="muted small">+{{ items | length - 5 }} more</span>{% endif %}
+{%- endmacro %}
+{% block content %}
+<h1>Managed policies</h1>
+<div id="policies-data" data-refresh>
+{% if not snap %}
+  {{ no_data() }}
+{% else %}
+<form id="policy-filters" method="get" action="{{ url_for('policies') }}" class="row search-row" role="search"
+      data-filters data-regions="#policies-summary, #policies-tbody">
+  <div id="policies-summary" class="row roles-summary">
+    <span class="muted small" id="policy-count">
+      {%- if f.active %}{{ rows | length }} of {{ total }} policies match the filters
+      {%- else %}{{ total }} polic{{ 'y' if total == 1 else 'ies' }}{% endif %}</span>
+    <a class="btn secondary" id="policies-xlsx" href="{{ url_for('policies_xlsx', **f.query()) }}"
+       title="Download the policies shown below (current filters) as an Excel workbook">Export to Excel</a>
+    {% if f.active %}<a href="{{ url_for('policies') }}" class="small">Clear filters</a>{% endif %}
+  </div>
+  <button type="submit" class="secondary" id="filters-apply">Apply filters</button>
+</form>
+<p class="muted small">Every customer managed policy (attached or not) and every attached AWS managed policy. Who uses
+  a policy comes from iam:ListEntitiesForPolicy and the collected attachments.</p>
+<table id="policies-table" class="roles">
+  <thead>
+    <tr><th>Policy</th><th>Type</th><th>Versions</th><th>Roles</th><th>Users</th><th>Groups</th><th>Findings</th><th></th></tr>
+    <tr class="col-filters">
+      <td><input name="q" form="policy-filters" type="search" value="{{ f.q }}" placeholder="name, ARN, description or user"
+          autocomplete="off" aria-label="Filter by name, ARN, description or who uses it"></td>
+      <td>{{ choice('type', 'Type', type_choices, f.type) }}</td>
+      <td>{{ choice('unattached', 'Attached', {'yes': 'unattached', 'no': 'attached'}, f.unattached) }}</td>
+      <td colspan="3">{{ choice('used_by', 'Used by', used_by_choices, f.used_by) }}</td>
+      <td></td><td></td>
+    </tr>
+  </thead>
+  <tbody id="policies-tbody">
+  {% for p in rows %}
+    <tr>
+      <td><a href="{{ url_for('policy_page', arn=p.arn) }}"><b>{{ p.name }}</b></a>
+        {% if p.unattached %}<span class="badge warn">unattached</span>{% endif %}
+        {% if p.description %}<div class="muted small">{{ p.description }}</div>{% endif %}</td>
+      <td>{{ 'AWS managed' if p.aws_managed else 'customer managed' }}</td>
+      <td>{{ p.version_count or '–' }}{% if p.default_version %} <span class="muted small">(default {{ p.default_version }})</span>{% endif %}</td>
+      <td>{{ names('role_page', p.roles) }}</td>
+      <td>{{ names('user_page', p.users) }}</td>
+      <td>{{ names('group_page', p.groups) }}</td>
+      <td>{% for rule, sev in p.findings.items() %}<span class="badge sev-{{ sev }}">{{ rule }}</span> {% else %}<span class="muted">–</span>{% endfor %}</td>
+      <td style="white-space: nowrap">
+        <a class="btn secondary" href="{{ url_for('policy_page', arn=p.arn) }}">View</a>
+        {% if not p.aws_managed %}
+        <form class="inline" method="post" action="{{ url_for('policy_clone') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="arn" value="{{ p.arn }}">
+          <button type="submit" class="secondary" title="Copy into a local draft (never written to AWS)">Clone to draft</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="8" class="muted">No policy matches{% if f.active %} the filters — <a href="{{ url_for('policies') }}">clear them</a>{% endif %}.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='roles.js') }}" defer></script>
+{% endblock %}

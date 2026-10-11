@@ -1,10 +1,14 @@
-"""Export a draft role: policy JSON files and Terraform HCL (both local only).
+"""Export a draft role, user or managed policy: policy JSON files and Terraform HCL (both
+local only).
 
 Terraform: ``aws_iam_role`` with its trust policy as an ``aws_iam_policy_document`` data
-source; inline policies as ``aws_iam_role_policy``; customer managed policies as
-``aws_iam_policy`` + ``aws_iam_role_policy_attachment``; AWS managed policies as an
-attachment by ARN. The output is ``terraform fmt`` style (aligned ``=``). RoleLens never
-runs Terraform.
+source (``aws_iam_user`` for a user, with ``aws_iam_user_group_membership`` for its
+groups); inline policies as ``aws_iam_role_policy`` / ``aws_iam_user_policy``; customer
+managed policies as ``aws_iam_policy`` + ``aws_iam_role_policy_attachment`` /
+``aws_iam_user_policy_attachment``; AWS managed policies as an attachment by ARN. A
+standalone managed policy is one ``aws_iam_policy``. Access keys and console passwords
+are never exported. The output is ``terraform fmt`` style (aligned ``=``). RoleLens
+never runs Terraform.
 """
 
 from __future__ import annotations
@@ -29,28 +33,65 @@ def _file_safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9+=,.@_-]+", "_", name) or "policy"
 
 
-def json_files(model: dict[str, Any]) -> dict[str, str]:
-    """``{path: content}``: role settings, the trust policy and one file per editable policy."""
-    files: dict[str, str] = {}
-    role = {
-        "RoleName": model.get("role_name", ""),
-        "Path": model.get("path", "/"),
-        "Description": model.get("description", ""),
-        "MaxSessionDuration": model.get("max_session_duration", 3600),
-        "PermissionsBoundary": model.get("permissions_boundary", "") or None,
-        "InlinePolicies": [],
-        "ManagedPolicyArns": [],
-    }
-    files["trust-policy.json"] = _pretty(model.get("trust") or {})
-    for p in model.get("policies") or []:
+def _policy_files(files: dict[str, str], policies: list[dict[str, Any]]) -> tuple[list, list]:
+    """One file per editable policy; returns the (inline names, managed ARNs) lists."""
+    inline: list[str] = []
+    managed: list[str] = []
+    for p in policies:
         kind, name = p.get("kind", "inline"), p.get("name", "")
         if kind == "inline":
-            role["InlinePolicies"].append(name)
+            inline.append(name)
         else:
-            role["ManagedPolicyArns"].append(p.get("arn", "") or f"(new) {name}")
+            managed.append(p.get("arn", "") or f"(new) {name}")
         if kind != "aws" and p.get("document") is not None:
             files[f"policies/{kind}-{_file_safe(name)}.json"] = _pretty(p["document"])
-    files["role.json"] = _pretty(role)
+    return inline, managed
+
+
+def json_files(model: dict[str, Any]) -> dict[str, str]:
+    """``{path: content}``: role settings, the trust policy and one file per editable policy
+    (user: user settings and its policies; managed policy: its settings and document)."""
+    entity = model.get("entity", "role")
+    files: dict[str, str] = {}
+    if entity == "user":
+        inline, managed = _policy_files(files, model.get("policies") or [])
+        files["user.json"] = _pretty(
+            {
+                "UserName": model.get("user_name", ""),
+                "Path": model.get("path", "/"),
+                "PermissionsBoundary": model.get("permissions_boundary", "") or None,
+                "Groups": list(model.get("groups") or []),
+                "InlinePolicies": inline,
+                "ManagedPolicyArns": managed,
+            }
+        )
+        return dict(sorted(files.items()))
+    if entity == "policy":
+        name = model.get("name", "")
+        files["policy.json"] = _pretty(
+            {
+                "PolicyName": name,
+                "Path": model.get("path", "/"),
+                "Description": model.get("description", ""),
+                "Arn": model.get("arn", "") or None,
+            }
+        )
+        if model.get("document") is not None:
+            files[f"policies/managed-{_file_safe(name)}.json"] = _pretty(model["document"])
+        return dict(sorted(files.items()))
+    files["trust-policy.json"] = _pretty(model.get("trust") or {})
+    inline, managed = _policy_files(files, model.get("policies") or [])
+    files["role.json"] = _pretty(
+        {
+            "RoleName": model.get("role_name", ""),
+            "Path": model.get("path", "/"),
+            "Description": model.get("description", ""),
+            "MaxSessionDuration": model.get("max_session_duration", 3600),
+            "PermissionsBoundary": model.get("permissions_boundary", "") or None,
+            "InlinePolicies": inline,
+            "ManagedPolicyArns": managed,
+        }
+    )
     return dict(sorted(files.items()))
 
 
@@ -186,8 +227,108 @@ def policy_document(name: str, doc: dict[str, Any]) -> Block:
     return b
 
 
+def _managed_policy_blocks(
+    blocks: list[tuple[str, Block]],
+    taken: set[str],
+    p: dict[str, Any],
+    description: str = "",
+) -> str:
+    """``aws_iam_policy`` (and its document) of a customer managed policy; returns its id."""
+    name = p.get("name", "")
+    pol_id = identifier(name, taken)
+    note = ""
+    if p.get("arn"):
+        note = (
+            f"# Customer managed policy {name} exists already; import it before "
+            f"applying:\n#   terraform import aws_iam_policy.{pol_id} {p['arn']}"
+        )
+    blocks.append(("", policy_document(pol_id, p.get("document") or {})))
+    items = [
+        ("name", hcl_string(name)),
+        ("path", hcl_string(p.get("path") or "/")),
+    ]
+    if description:
+        items.append(("description", hcl_string(description)))
+    items.append(("policy", f"data.aws_iam_policy_document.{pol_id}.json"))
+    blocks.append((note, Block("resource", ("aws_iam_policy", pol_id), items)))
+    return pol_id
+
+
+def _policy_blocks(
+    blocks: list[tuple[str, Block]],
+    taken: set[str],
+    owner: str,
+    owner_id: str,
+    policies: list[dict[str, Any]],
+) -> None:
+    """Inline policies and attachments of a role or user (``owner``: role | user)."""
+    # The inline policy names its owner by id (role, as before) or name (user).
+    ref = f"aws_iam_{owner}.{owner_id}." + ("id" if owner == "role" else "name")
+    for p in policies:
+        kind, name = p.get("kind", "inline"), p.get("name", "")
+        if kind == "inline":
+            doc_id = identifier(f"{owner_id}_{name}", taken)
+            blocks.append(("", policy_document(doc_id, p.get("document") or {})))
+            items = [
+                ("name", hcl_string(name)),
+                (owner, ref),
+                ("policy", f"data.aws_iam_policy_document.{doc_id}.json"),
+            ]
+            blocks.append(("", Block("resource", (f"aws_iam_{owner}_policy", doc_id), items)))
+            continue
+        if kind == "managed":
+            policy_arn = f"aws_iam_policy.{_managed_policy_blocks(blocks, taken, p)}.arn"
+        else:  # AWS managed: attached by ARN
+            policy_arn = hcl_string(p.get("arn", ""))
+        attach_id = identifier(f"{owner_id}_{name}", taken)
+        items = [(owner, f"aws_iam_{owner}.{owner_id}.name"), ("policy_arn", policy_arn)]
+        labels = (f"aws_iam_{owner}_policy_attachment", attach_id)
+        blocks.append(("", Block("resource", labels, items)))
+
+
+def _render(blocks: list[tuple[str, Block]], header: str) -> str:
+    parts = []
+    if header:
+        parts.append("\n".join(f"# {line}".rstrip() for line in header.splitlines()))
+    for note, block in blocks:
+        text = "\n".join(block.render())
+        parts.append(f"{note}\n{text}" if note else text)
+    return "\n\n".join(parts) + "\n"
+
+
 def terraform(model: dict[str, Any], header: str = "") -> str:
-    """Terraform HCL for a draft role model."""
+    """Terraform HCL for a draft role, user or managed policy model."""
+    entity = model.get("entity", "role")
+    if entity == "user":
+        return _user_terraform(model, header)
+    if entity == "policy":
+        blocks: list[tuple[str, Block]] = []
+        policy = {**model, "kind": "managed"}
+        _managed_policy_blocks(blocks, set(), policy, model.get("description", ""))
+        return _render(blocks, header)
+    return _role_terraform(model, header)
+
+
+def _user_terraform(model: dict[str, Any], header: str) -> str:
+    taken: set[str] = set()
+    user_id = identifier(model.get("user_name", "user"), taken)
+    blocks: list[tuple[str, Block]] = []
+    user = Block("resource", ("aws_iam_user", user_id))
+    user.attr("name", hcl_string(model.get("user_name", "")))
+    user.attr("path", hcl_string(model.get("path", "/") or "/"))
+    if model.get("permissions_boundary"):
+        user.attr("permissions_boundary", hcl_string(model["permissions_boundary"]))
+    blocks.append(("", user))
+    _policy_blocks(blocks, taken, "user", user_id, model.get("policies") or [])
+    groups = [g for g in model.get("groups") or [] if g]
+    if groups:
+        items = [("user", f"aws_iam_user.{user_id}.name"), ("groups", hcl_list(groups))]
+        labels = ("aws_iam_user_group_membership", identifier(f"{user_id}_groups", taken))
+        blocks.append(("", Block("resource", labels, items)))
+    return _render(blocks, header)
+
+
+def _role_terraform(model: dict[str, Any], header: str) -> str:
     taken: set[str] = set()
     role_id = identifier(model.get("role_name", "role"), taken)
     trust_id = identifier(f"{role_id}_trust", taken)
@@ -204,46 +345,5 @@ def terraform(model: dict[str, Any], header: str = "") -> str:
     if model.get("permissions_boundary"):
         role.attr("permissions_boundary", hcl_string(model["permissions_boundary"]))
     blocks.append(("", role))
-
-    for p in model.get("policies") or []:
-        kind, name = p.get("kind", "inline"), p.get("name", "")
-        if kind == "inline":
-            doc_id = identifier(f"{role_id}_{name}", taken)
-            blocks.append(("", policy_document(doc_id, p.get("document") or {})))
-            items = [
-                ("name", hcl_string(name)),
-                ("role", f"aws_iam_role.{role_id}.id"),
-                ("policy", f"data.aws_iam_policy_document.{doc_id}.json"),
-            ]
-            blocks.append(("", Block("resource", ("aws_iam_role_policy", doc_id), items)))
-            continue
-        if kind == "managed":
-            pol_id = identifier(name, taken)
-            note = ""
-            if p.get("arn"):
-                note = (
-                    f"# Customer managed policy {name} exists already; import it before "
-                    f"applying:\n#   terraform import aws_iam_policy.{pol_id} {p['arn']}"
-                )
-            blocks.append(("", policy_document(pol_id, p.get("document") or {})))
-            items = [
-                ("name", hcl_string(name)),
-                ("path", hcl_string(p.get("path") or "/")),
-                ("policy", f"data.aws_iam_policy_document.{pol_id}.json"),
-            ]
-            blocks.append((note, Block("resource", ("aws_iam_policy", pol_id), items)))
-            policy_arn = f"aws_iam_policy.{pol_id}.arn"
-        else:  # AWS managed: attached by ARN
-            policy_arn = hcl_string(p.get("arn", ""))
-        attach_id = identifier(f"{role_id}_{name}", taken)
-        items = [("role", f"aws_iam_role.{role_id}.name"), ("policy_arn", policy_arn)]
-        labels = ("aws_iam_role_policy_attachment", attach_id)
-        blocks.append(("", Block("resource", labels, items)))
-
-    parts = []
-    if header:
-        parts.append("\n".join(f"# {line}".rstrip() for line in header.splitlines()))
-    for note, block in blocks:
-        text = "\n".join(block.render())
-        parts.append(f"{note}\n{text}" if note else text)
-    return "\n\n".join(parts) + "\n"
+    _policy_blocks(blocks, taken, "role", role_id, model.get("policies") or [])
+    return _render(blocks, header)

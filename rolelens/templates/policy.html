@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% from "_macros.html" import graph_panel, graph_scripts with context %}
+{% from "_findings.html" import finding_list %}
+{% block title %}{{ p.name }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('policies') }}" class="back-link">← Policies</a></p>
+<div class="row" style="justify-content: space-between">
+  <h1>{{ p.name }} <span class="badge">{{ 'AWS managed' if p.aws_managed else 'customer managed' }}</span>
+    {% if p.unattached %}<span class="badge warn">unattached</span>{% endif %}</h1>
+  {% if not p.aws_managed %}
+  <form method="post" action="{{ url_for('policy_clone') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="arn" value="{{ p.arn }}">
+    <button type="submit" title="Copy into a local draft (never written to AWS)">Clone to draft</button>
+  </form>
+  {% endif %}
+</div>
+<p class="muted"><span class="mono">{{ p.arn }}</span>
+  {% if p.description %}· {{ p.description }}{% endif %}
+  {% if p.create_date %}· created {{ p.create_date | localtime }}{% endif %}
+  {% if p.update_date %}· updated {{ p.update_date | localtime }}{% endif %}
+  {% if p.attachment_count is not none %}· attachment count {{ p.attachment_count }}{% endif %}</p>
+
+<h2 id="usage">Used by ({{ p.attached }})</h2>
+{% if p.unattached %}<p class="muted">Attached to no role, user or group: a candidate for deletion.</p>{% endif %}
+<table class="insights" id="policy-usage">
+  <thead><tr><th>Roles</th><th>Users</th><th>Groups</th></tr></thead>
+  <tbody><tr>
+    <td>{% for n in p.roles %}<a href="{{ url_for('role_page', name=n) }}" class="tag">{{ n }}</a> {% else %}<span class="muted">none</span>{% endfor %}</td>
+    <td>{% for n in p.users %}<a href="{{ url_for('user_page', name=n) }}" class="tag">{{ n }}</a> {% else %}<span class="muted">none</span>{% endfor %}</td>
+    <td>{% for n in p.groups %}<a href="{{ url_for('group_page', name=n) }}" class="tag">{{ n }}</a> {% else %}<span class="muted">none</span>{% endfor %}</td>
+  </tr></tbody>
+</table>
+
+{{ graph_panel(layouts, 'graph-data', p.name) }}
+<script type="application/json" id="graph-data">{{ graph | tojson }}</script>
+
+<h2 id="versions">Versions ({{ p.version_count }})</h2>
+<table class="insights" id="policy-versions">
+  <thead><tr><th>Version</th><th>Created</th><th></th></tr></thead>
+  <tbody>
+  {% for v in p.versions %}
+    <tr><td class="mono">{{ v.id }}</td><td>{{ v.created | localtime }}</td>
+      <td>{% if v.default %}<span class="badge ok">default</span>{% endif %}</td></tr>
+  {% else %}
+    <tr><td colspan="3" class="muted">Versions not collected (iam:ListPolicyVersions).</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2 id="document">Document{% if p.default_version %} <span class="muted small">(default version {{ p.default_version }})</span>{% endif %}</h2>
+{% if p.document is none %}<p class="badge warn">document not readable (see the collection warnings)</p>
+{% else %}
+<details class="card" open><summary>JSON</summary>
+  <div class="row"><button type="button" class="secondary" data-copy="#policy-json">Copy</button></div>
+  <pre class="json" id="policy-json">{{ dumps(p.document) }}</pre>
+</details>
+{% endif %}
+
+<h2 id="findings">Risk findings ({{ findings | length }})</h2>
+{{ finding_list(findings) }}
+{% endblock %}
+{% block scripts %}
+{{ graph_scripts() }}
+<script src="{{ url_for('static', filename='copy.js') }}" defer></script>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const data = JSON.parse(document.getElementById("graph-data").textContent);
+  window.RoleGraph.mount(document.getElementById("cy")).setData(data);
+});
+</script>
+{% endblock %}

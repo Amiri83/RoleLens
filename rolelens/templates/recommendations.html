@@ -8,8 +8,8 @@
 {% if not snap %}
   {{ no_data() }}
 {% else %}
-<p class="muted">Roles compared by their effective permissions (every policy, wildcards expanded). Service-linked
-  roles and roles without permissions are left out.</p>
+<p class="muted">Roles, users and groups compared by their effective permissions (every policy, wildcards expanded).
+  Service-linked roles and principals without permissions are left out.</p>
 
 <h2>Duplicate roles ({{ duplicates | length }} group{{ '' if duplicates | length == 1 else 's' }})</h2>
 <p class="muted small">Same effective permissions and the same trust policy: one role of each group is enough.</p>
@@ -57,6 +57,41 @@
   {% endfor %}
   </tbody>
 </table>
+
+{# Users and groups: same engine (effective permissions, user = own + group policies). #}
+{% for ptype, label, endpoint in [('user', 'users', 'user_page'), ('group', 'groups', 'group_page')] %}
+{% set r = identities[ptype] %}
+<h2 id="{{ ptype }}-recommendations">Duplicate {{ label }} ({{ r.duplicates | length }} group{{ '' if r.duplicates | length == 1 else 's' }})</h2>
+<p class="muted small">Same effective permissions{% if ptype == 'user' %} (their own policies and those of their groups){% endif %}:
+  {% if ptype == 'user' %}put them in one group and drop the per-user policies{% else %}one group of each set is enough{% endif %}.</p>
+<table class="insights" id="{{ ptype }}-duplicates">
+  <thead><tr><th>{{ label | capitalize }}</th></tr></thead>
+  <tbody>
+  {% for group in r.duplicates %}
+    <tr><td>{% for name in group %}<a href="{{ url_for(endpoint, name=name) }}" class="tag">{{ name }}</a> {% endfor %}</td></tr>
+  {% else %}
+    <tr><td class="muted">No duplicates.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+<h2>Overlapping {{ label }} ({{ r.overlaps | length }})</h2>
+<table class="insights" id="{{ ptype }}-overlaps">
+  <thead><tr><th>A</th><th>B</th><th>Jaccard</th><th>Relation</th><th>Actions (only A / common / only B)</th></tr></thead>
+  <tbody>
+  {% for o in r.overlaps %}
+    <tr>
+      <td><a href="{{ url_for(endpoint, name=o.a) }}">{{ o.a }}</a></td>
+      <td><a href="{{ url_for(endpoint, name=o.b) }}">{{ o.b }}</a></td>
+      <td>{{ '%.2f' | format(o.jaccard) }}</td>
+      <td><span class="badge">{{ {'subset': 'A ⊂ B', 'superset': 'A ⊃ B', 'equal': 'same actions', 'overlap': 'overlap'}[o.relation] }}</span></td>
+      <td>{{ o.only_a }} / {{ o.common }} / {{ o.only_b }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="muted">No pair reaches the threshold.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endfor %}
 {% endif %}
 </div>
 {% endblock %}

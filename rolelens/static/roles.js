@@ -1,18 +1,20 @@
-/* Roles page column filters. The filters are a GET form (#role-filters; the inputs sit in
-   the table header and join it with form="role-filters"), filtered on the server so the
-   page and "Export to Excel" (/roles.xlsx with the same query) always show the same rows.
-   With JavaScript every change updates the URL and re-fetches only the row count / export
-   link and the table body in place (refresh.js); without it, "Apply filters" submits the
-   form. Listeners are delegated: the whole region is replaced after a collection. */
+/* Column filters of the Roles, Users and Policies pages. The filters are a GET form
+   (form[data-filters], e.g. #role-filters; the inputs sit in the table header and join it
+   with form="..."), filtered on the server so the page and "Export to Excel" (the .xlsx
+   URL with the same query) always show the same rows. With JavaScript every change
+   updates the URL and re-fetches only the regions named by the form's data-regions (row
+   count / export link and the table body) in place (refresh.js); without it, "Apply
+   filters" submits the form. Listeners are delegated: the whole region is replaced after
+   a collection. */
 (function () {
   "use strict";
 
   const DEBOUNCE_MS = 250;
-  const FORM_ID = "role-filters";
   let timer = null;
 
   function filterForm(el) {
-    return el && el.form && el.form.id === FORM_ID ? el.form : null;
+    const form = el && el.form;
+    return form && form.hasAttribute("data-filters") ? form : null;
   }
 
   function apply(form) {
@@ -26,7 +28,8 @@
     url.search = qs;
     window.history.replaceState(null, "", url);
     if (!window.rolelensRefresh) { window.location.assign(url); return; }
-    window.rolelensRefresh.regions(url.href, "#roles-summary, #roles-tbody").catch((err) => {
+    const regions = form.dataset.regions || "#roles-summary, #roles-tbody";
+    window.rolelensRefresh.regions(url.href, regions).catch((err) => {
       if (err.name !== "AbortError") window.location.assign(url);
     });
   }
@@ -42,7 +45,7 @@
     if (form && evt.target.tagName === "SELECT") apply(form);
   });
   document.addEventListener("submit", (evt) => {
-    if (evt.target.id !== FORM_ID) return;
+    if (!evt.target.hasAttribute || !evt.target.hasAttribute("data-filters")) return;
     evt.preventDefault();
     apply(evt.target);
   });

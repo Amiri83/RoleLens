@@ -55,6 +55,9 @@ def test_graph_chain_from_principals_to_resources():
 
     assert graph["stats"] == {
         "principals": 2,
+        "roles": 1,
+        "users": 0,
+        "groups": 0,
         "policies": 2,
         "services": 2,
         "actions": 3,

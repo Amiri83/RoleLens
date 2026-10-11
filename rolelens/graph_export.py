@@ -37,13 +37,19 @@ FONT = "system-ui, -apple-system, 'Segoe UI', sans-serif"
 # Colours of graph.js (keep in sync).
 ALLOW, DENY, MIXED, NEUTRAL = "#2f8f4e", "#c0392b", "#c27c0e", "#8a94a3"
 ROLE, LINE, TEXT = "#2457c5", "#5b6573", "#1f2933"
-NODE_TYPES = ("principal", "role", "policy", "service", "action", "resource")
-EFFECTS = ("allow", "deny", "mixed", "neutral", "role")
+NODE_TYPES = ("principal", "role", "user", "group", "policy", "service", "action", "resource")
+EFFECTS = ("allow", "deny", "mixed", "neutral", "role", "entity")
 EDGE_EFFECTS = ("Allow", "Deny", "Attached")
+USER = "#0f766e"  # user and group nodes
 
 # Node-type icons: 24x24 stroke drawings (RoleLens' own, not AWS artwork).
 _ICON_PATHS = {
     "principal": '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/>',
+    "user": '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/>',
+    "group": (
+        '<circle cx="9" cy="8" r="3.5"/><path d="M2 20c0-3.9 3.1-7 7-7s7 3.1 7 7"/>'
+        '<path d="M15.5 4.6a3.5 3.5 0 0 1 0 6.8M18 13.4c2.3.9 4 3.2 4 6.6"/>'
+    ),
     "role": (
         '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="11" r="2.5"/>'
         '<path d="M5.5 17c.6-1.9 2-3 3.5-3s2.9 1.1 3.5 3M15 10h4M15 14h3"/>'
@@ -59,6 +65,8 @@ _ICON_PATHS = {
 _ICON_COLORS = {
     "principal": LINE,
     "role": "#ffffff",
+    "user": "#ffffff",
+    "group": "#ffffff",
     "policy": "#8c4fff",
     "service": ROLE,
     "action": TEXT,
@@ -75,6 +83,22 @@ NODE_STYLES: dict[str, dict[str, Any]] = {
         "color": "#ffffff",
         "weight": "700",
         "size": 13,
+    },
+    "user": {
+        "fill": USER,
+        "stroke": "#0b5752",
+        "shape": "round",
+        "color": "#ffffff",
+        "weight": "700",
+        "size": 13,
+    },
+    "group": {
+        "fill": USER,
+        "stroke": "#0b5752",
+        "shape": "round",
+        "color": "#ffffff",
+        "weight": "700",
+        "size": 12,
     },
     "policy": {"fill": "#f7f3ff", "stroke": "#8c4fff", "shape": "rect"},
     "service": {"fill": "#f6f7f9", "stroke": ROLE, "shape": "ellipse"},
@@ -134,6 +158,12 @@ AWS4_SERVICES: dict[str, tuple[str, str]] = {
 }
 AWS4_FALLBACK = ("management_console", _GENERAL)  # "*" and services without an icon
 AWS4_ICON_SIZE = 48
+# draw.io AWS shapes of the IAM principals.
+AWS4_ENTITY_SHAPES = {
+    "role": "mxgraph.aws4.role",
+    "user": "mxgraph.aws4.user",
+    "group": "mxgraph.aws4.users",
+}
 # Built-in draw.io shapes for the other node types (keys: NODE_STYLES "shape").
 DRAWIO_SHAPES = {
     "round": "rounded=1;arcSize=20;",
@@ -563,7 +593,7 @@ def _vertex_style(n: VNode) -> str:
             "shape": "mxgraph.aws4.resourceIcon",
             "resIcon": f"mxgraph.aws4.{icon}",
         }
-    elif n.type == "role":
+    elif n.type in AWS4_ENTITY_SHAPES:
         parts = {
             "sketch": 0,
             "outlineConnect": 0,
@@ -580,7 +610,7 @@ def _vertex_style(n: VNode) -> str:
             "fontStyle": 1,
             "aspect": "fixed",
             "pointerEvents": 1,
-            "shape": "mxgraph.aws4.role",
+            "shape": AWS4_ENTITY_SHAPES[n.type],
         }
     else:
         style = node_style(n)
@@ -652,7 +682,7 @@ def to_drawio(view: View) -> str:
     ids: dict[str, str] = {}
     for i, n in enumerate(view.nodes, start=1):
         cid = ids[n.id] = f"n{i}"
-        if n.type in ("service", "role"):
+        if n.type == "service" or n.type in AWS4_ENTITY_SHAPES:
             # AWS icons are square, with the label below them.
             nw = nh = AWS4_ICON_SIZE
         else:

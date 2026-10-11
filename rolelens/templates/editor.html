@@ -1,17 +1,22 @@
 {% extends "base.html" %}
 {% from "_macros.html" import graph_panel, graph_scripts with context %}
-{% block title %}Draft {{ draft.model.role_name }}{% endblock %}
+{% block title %}Draft {{ draft.name }}{% endblock %}
 {% block content %}
+{% set entity = draft.entity %}
 <p><a href="{{ url_for('drafts_list') }}" class="back-link">← Drafts</a></p>
 <div class="row" style="justify-content: space-between">
-  <h1>Draft #{{ draft.id }}: {{ draft.model.role_name }}
-    <span class="muted small">cloned from <a href="{{ url_for('role_page', name=draft.source_role) }}">{{ draft.source_role }}</a></span></h1>
+  <h1>Draft #{{ draft.id }}: {{ draft.name }} {% if entity != 'role' %}<span class="badge">{{ 'managed policy' if entity == 'policy' else entity }}</span>{% endif %}
+    <span class="muted small">cloned from
+      {%- if entity == 'user' %} <a href="{{ url_for('user_page', name=draft.source_role) }}">{{ draft.source_role }}</a>
+      {%- elif entity == 'policy' and draft.original.arn %} <a href="{{ url_for('policy_page', arn=draft.original.arn) }}">{{ draft.source_role }}</a>
+      {%- elif entity == 'policy' %} {{ draft.source_role }}
+      {%- else %} <a href="{{ url_for('role_page', name=draft.source_role) }}">{{ draft.source_role }}</a>{% endif %}</span></h1>
   <div class="row editor-actions">
     <span class="muted small" id="save-state" aria-live="polite"></span>
     <button type="submit" form="save-form" id="save-btn">Save draft</button>
     <a class="btn secondary" href="{{ url_for('draft_export', draft_id=draft.id) }}">Export…</a>
     <form class="inline" method="post" action="{{ url_for('draft_reset', draft_id=draft.id) }}"
-          onsubmit="return confirm('Discard every change and go back to the collected role?')">
+          onsubmit="return confirm('Discard every change and go back to the collected {{ entity }}?')">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="secondary">Reset</button>
     </form>
@@ -22,6 +27,26 @@
 <div class="editor-layout">
   <section class="editor-col">
     <fieldset class="card role-fields" id="role-fields">
+      {% if entity == 'user' %}
+      <legend>User</legend>
+      <div class="row">
+        <div><label for="f-user_name">Name</label><input id="f-user_name" data-field="user_name" size="28" maxlength="64"></div>
+        <div><label for="f-path">Path</label><input id="f-path" data-field="path" size="14" class="mono"></div>
+      </div>
+      <label for="f-groups">Groups <span class="muted">(comma-separated; their policies are not part of the draft)</span></label>
+      <input id="f-groups" data-field="groups" data-list size="60">
+      <label for="f-permissions_boundary">Permissions boundary ARN <span class="muted">(optional)</span></label>
+      <input id="f-permissions_boundary" data-field="permissions_boundary" size="60" class="mono">
+      <p class="muted small">Access keys, console passwords and MFA devices are never part of a draft.</p>
+      {% elif entity == 'policy' %}
+      <legend>Managed policy</legend>
+      <div class="row">
+        <div><label for="f-name">Name</label><input id="f-name" data-field="name" size="28" maxlength="128"></div>
+        <div><label for="f-path">Path</label><input id="f-path" data-field="path" size="14" class="mono"></div>
+      </div>
+      <label for="f-description">Description</label>
+      <input id="f-description" data-field="description" size="60" maxlength="1000">
+      {% else %}
       <legend>Role</legend>
       <div class="row">
         <div><label for="f-role_name">Name</label><input id="f-role_name" data-field="role_name" size="28" maxlength="64"></div>
@@ -33,6 +58,7 @@
       <input id="f-description" data-field="description" size="60" maxlength="1000">
       <label for="f-permissions_boundary">Permissions boundary ARN <span class="muted">(optional)</span></label>
       <input id="f-permissions_boundary" data-field="permissions_boundary" size="60" class="mono">
+      {% endif %}
     </fieldset>
 
     <div class="card doc-card">
@@ -40,8 +66,10 @@
         <label for="doc-select" class="inline-label">Document</label>
         <select id="doc-select"></select>
         <button type="button" class="secondary" id="doc-format" title="Pretty-print the JSON">Format</button>
+        {% if entity != 'policy' %}
         <button type="button" class="secondary" id="doc-add">Add inline policy</button>
         <button type="button" class="danger" id="doc-remove">Remove policy</button>
+        {% endif %}
       </div>
       <div class="row doc-meta" id="doc-meta">
         <label for="doc-name" class="inline-label">Policy name</label>
@@ -67,11 +95,11 @@
   </section>
 
   <section class="graph-col">
-    {{ graph_panel(layouts, 'draft-data', draft.model.role_name or 'draft') }}
+    {{ graph_panel(layouts, 'draft-data', draft.name or 'draft') }}
   </section>
 </div>
 
-<h2>Changes vs the collected role</h2>
+<h2>Changes vs the collected {{ 'managed policy' if entity == 'policy' else entity }}</h2>
 <div id="diff">
   {% set diff = preview.diff %}
   {% include "_diff.html" %}
@@ -79,6 +107,7 @@
 
 <script type="application/json" id="draft-data">{{ {"model": draft.model, "original": draft.original, "graph": preview.graph} | tojson }}</script>
 <div id="editor-config" hidden
+     data-entity="{{ entity }}"
      data-preview-url="{{ url_for('draft_preview', draft_id=draft.id) }}"
      data-save-url="{{ url_for('draft_save', draft_id=draft.id) }}"
      data-csrf="{{ csrf_token }}"></div>

@@ -124,3 +124,57 @@ def seed_iam() -> dict[str, Any]:
     )
     iam.create_role(RoleName="role-b", AssumeRolePolicyDocument=json.dumps(ACCOUNT_TRUST))
     return {"policy_arn": policy_arn}
+
+
+ADMIN_DOC = {
+    "Version": "2012-10-17",
+    "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}],
+}
+UNUSED_DOC = {
+    "Version": "2012-10-17",
+    "Statement": [
+        {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::bucket-a"}
+    ],
+}
+
+
+def seed_identities(policy_arn: str) -> dict[str, Any]:
+    """Placeholder users, groups and policies in moto (call inside ``mock_aws``, after
+    :func:`seed_iam`, with its ``policy_arn``).
+
+    * group-a: customer managed policy-a attached, inline group-inline-a (= INLINE_A);
+    * group-admin: inline admin-inline (Action "*" on "*");
+    * user-a: console password without MFA, one access key, in group-a, its own inline
+      user-inline-a (= POLICY_A's statement);
+    * user-b and user-c: only in group-a (identical effective permissions);
+    * user-admin: in group-admin;
+    * policy-unused: customer managed, attached to nothing.
+
+    Returns the secret of user-a's access key, so tests can check it is never stored.
+    """
+    iam = boto3.client("iam", region_name="us-east-1")
+    iam.create_group(GroupName="group-a")
+    iam.attach_group_policy(GroupName="group-a", PolicyArn=policy_arn)
+    iam.put_group_policy(
+        GroupName="group-a", PolicyName="group-inline-a", PolicyDocument=json.dumps(INLINE_A)
+    )
+    iam.create_group(GroupName="group-admin")
+    iam.put_group_policy(
+        GroupName="group-admin", PolicyName="admin-inline", PolicyDocument=json.dumps(ADMIN_DOC)
+    )
+    for name in ("user-a", "user-b", "user-c", "user-admin"):
+        iam.create_user(UserName=name)
+    for name in ("user-a", "user-b", "user-c"):
+        iam.add_user_to_group(GroupName="group-a", UserName=name)
+    iam.add_user_to_group(GroupName="group-admin", UserName="user-admin")
+    iam.create_login_profile(UserName="user-a", Password="Example-Placeholder-0")
+    key = iam.create_access_key(UserName="user-a")["AccessKey"]
+    iam.put_user_policy(
+        UserName="user-a", PolicyName="user-inline-a", PolicyDocument=json.dumps(POLICY_A)
+    )
+    unused = iam.create_policy(PolicyName="policy-unused", PolicyDocument=json.dumps(UNUSED_DOC))
+    return {
+        "key_id": key["AccessKeyId"],
+        "secret": key["SecretAccessKey"],
+        "unused_arn": unused["Policy"]["Arn"],
+    }
