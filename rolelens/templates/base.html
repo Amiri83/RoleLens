@@ -64,9 +64,10 @@
   {% endfor %}
   {% block content %}{% endblock %}
 </main>
-{# Background jobs (IAM collection): progress modal, see jobs.js. Close hides it (a running
-   job goes on in the background); after a job that changed data the page's
-   data-refresh regions are re-fetched in place (refresh.js). #}
+{# Background jobs (IAM collection): progress modal and its minimized badge, on every page
+   (app-wide state, see jobs.js). Close minimizes a running job to the badge; the badge
+   stays on every tab until the job's result is dismissed; after a job that changed data
+   the page's data-refresh regions are re-fetched in place (refresh.js). #}
 <div id="job-modal" class="job-modal" role="dialog" aria-modal="true" aria-labelledby="job-title" hidden
      data-csrf="{{ csrf_token }}"
      data-current-url="{{ url_for('job_current') }}"

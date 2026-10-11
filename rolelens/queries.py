@@ -360,6 +360,19 @@ def _permission_source(direct: int, via_group: int) -> str:
     return "group" if via_group else "none"
 
 
+# Columns of a user known only by name (see user_list): unknown metadata.
+_UNLISTED_USER: dict[str, Any] = {
+    "path": "",
+    "arn": "",
+    "create_date": "",
+    "password_enabled": None,
+    "password_last_used": "",
+    "mfa_active": None,
+    "permissions_boundary": "",
+    "metadata_source": "",
+}
+
+
 def user_list(
     conn: sqlite3.Connection, snap_id: int, now: datetime | None = None
 ) -> list[dict[str, Any]]:
@@ -370,7 +383,8 @@ def user_list(
     unused the longest: days since its last use, or since its creation if never used).
     ``last_activity`` is the latest console sign-in or access key use; ``idle_days`` the
     days since then (since the user's creation if it was never active). ``permissions``
-    says where the user's policies come from: direct, group, both or none.
+    says where the user's policies come from: direct, group, both or none. ``listed`` is
+    False for a user known only as a group member or a policy attachment (metadata unknown).
     """
     now = now or datetime.now(UTC)
     counts = _policy_counts(conn, snap_id, "user")
@@ -386,11 +400,23 @@ def user_list(
     for k in conn.execute("SELECT * FROM user_access_keys WHERE snapshot_id=?", (snap_id,)):
         keys.setdefault(k["user_name"], []).append(k)
     findings = _identity_findings(conn, snap_id, "user")
-    out = []
-    for r in conn.execute(
-        "SELECT * FROM users WHERE snapshot_id=? ORDER BY user_name COLLATE NOCASE", (snap_id,)
+    listed = {
+        r["user_name"]: r
+        for r in conn.execute("SELECT * FROM users WHERE snapshot_id=?", (snap_id,))
+    }
+    # Users seen as group members (iam:GetGroup) or policy attachments
+    # (iam:ListEntitiesForPolicy) but not listed (iam:ListUsers not allowed): the Groups
+    # and Policies pages show them, so the Users page does too, with what is known.
+    attached: dict[str, set[str]] = {}
+    for e in conn.execute(
+        "SELECT entity_name, arn FROM policy_entities WHERE snapshot_id=? AND entity_type='user'",
+        (snap_id,),
     ):
-        name = r["user_name"]
+        attached.setdefault(e["entity_name"], set()).add(e["arn"])
+    names = sorted({*listed, *groups, *attached}, key=lambda n: (n.lower(), n))
+    out = []
+    for name in names:
+        r = listed.get(name) or _UNLISTED_USER
         user_keys = keys.get(name, [])
         active = [k for k in user_keys if k["status"] == "Active"]
         ages = [days_since(k["create_date"], now) for k in active]
@@ -398,7 +424,9 @@ def user_list(
         used = [r["password_last_used"], *(k["last_used_at"] for k in user_keys)]
         last = max((v for v in used if v), default="")
         inline = counts.get((name, "inline"), 0)
-        managed = counts.get((name, "managed"), 0)
+        managed = (
+            counts.get((name, "managed"), 0) if name in listed else len(attached.get(name, ()))
+        )
         member_of = groups.get(name, [])
         via_group = sum(
             group_counts.get((g, "inline"), 0) + group_counts.get((g, "managed"), 0)
@@ -430,6 +458,7 @@ def user_list(
                 "findings": by_rule,
                 "severity": next(iter(by_rule.values()), ""),
                 "source": r["metadata_source"],
+                "listed": name in listed,
             }
         )
     return out

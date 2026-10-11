@@ -5,6 +5,7 @@ Placeholder data only (account 123456789012, role-a, bucket-a, fake credentials)
 import html
 import io
 import json
+import threading
 import zipfile
 
 import boto3
@@ -436,6 +437,47 @@ def test_job_modal_close_and_data_refresh_markup(app, client):
     job = client.get(body["status_url"]).get_json()["job"]
     assert job["changes_data"] is True
     assert client.get("/jobs/current").get_json()["job"]["changes_data"] is True
+
+
+TABS = ("/", "/users", "/groups", "/policies", "/insights", "/drafts", "/settings", "/logs")
+
+
+@mock_aws
+def test_collection_indicator_is_app_wide_across_tabs(home):
+    """Regression: the collection progress modal / minimized badge was per page, so it was
+    lost on a tab switch. Started on one tab, the job is followed on every tab (modal, badge
+    and the job it re-attaches to) while it runs and once it has finished."""
+    seed_iam()
+    release = threading.Event()
+
+    def gateway(_acct):
+        release.wait(30)  # keeps the collection running while the tabs are visited
+        return _gateway()
+
+    app = create_app(home, testing=True, gateway_factory=gateway)
+    client = app.test_client()
+    client.get("/")
+    _add_account(client)
+    body = _post(client, "/collect", {"background": "1"}).get_json()
+    job_id = body["job"]["id"]
+    try:
+        for tab in TABS:
+            page = client.get(tab).get_data(as_text=True)
+            assert 'id="job-modal"' in page and 'id="job-badge"' in page, tab
+            assert 'data-current-url="/jobs/current"' in page and "jobs.js" in page, tab
+            job = client.get("/jobs/current").get_json()["job"]
+            assert job["id"] == job_id and job["running"], tab
+    finally:
+        release.set()
+    assert app.extensions["rolelens"]["jobs"].wait(job_id, 30)
+    for tab in TABS:
+        assert 'id="job-badge"' in client.get(tab).get_data(as_text=True), tab
+        job = client.get("/jobs/current").get_json()["job"]
+        assert job["id"] == job_id and job["state"] == "done", tab
+    # The modal / badge state (minimized or not, dismissed) is app-wide, not per page.
+    script = client.get("/static/jobs.js").get_data(as_text=True)
+    assert 'UI_KEY = "rolelens-job-ui"' in script and "localStorage" in script
+    assert "sessionStorage" not in script
 
 
 def test_logs_page(client):

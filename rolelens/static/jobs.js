@@ -2,17 +2,20 @@
    Forms marked data-job are posted with background=1; the server starts the job (one per
    account) and this script polls its state into the modal: current step, done / total,
    elapsed time, the live log tail, Cancel (while running) and Close. Close on a running
-   job only hides the modal (a badge follows the job; when it ends, its result is shown).
-   Closing a finished job that changed data (changes_data, e.g. a collection) re-fetches
-   the page's data in place (refresh.js) instead of reloading the page. A reload
-   re-attaches to the account's running job; a job started from this tab and finished
-   while the page was reloading is shown once more with its result. Without JavaScript
-   the forms post normally and the job runs to the end before the page is redrawn. */
+   job minimizes the modal to a badge that follows the job; when the job ends the badge
+   stays, showing the outcome, until it is clicked (the modal comes back with the result).
+   Closing a finished job dismisses it; if it changed data (changes_data, e.g. a
+   collection) the page's data is re-fetched in place (refresh.js) instead of reloading.
+   The modal / badge state is app-wide, not per page: it is kept in localStorage (UI_KEY)
+   and every page re-attaches to the account's job on load, so switching tabs keeps the
+   modal or the badge as it was. Without JavaScript the forms post normally and the job
+   runs to the end before the page is redrawn. */
 (function () {
   "use strict";
 
   const POLL_MS = 1000;
-  const WATCH_KEY = "rolelens-job-watch";  // sessionStorage: job started from this tab
+  // localStorage: {id, minimized} of the job this browser follows; removed on dismiss.
+  const UI_KEY = "rolelens-job-ui";
   const modal = document.getElementById("job-modal");
   if (!modal) return;
   const $ = (id) => document.getElementById(id);
@@ -35,6 +38,28 @@
   let running = false;
 
   const url = (template, id) => template.replace("__ID__", encodeURIComponent(id));
+
+  function loadUi() {
+    try {
+      return JSON.parse(localStorage.getItem(UI_KEY)) || null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function saveUi(minimized) {
+    if (!jobId) return;
+    try {
+      localStorage.setItem(UI_KEY, JSON.stringify({ id: jobId, minimized: minimized }));
+    } catch (err) { /* storage unavailable: the state lasts until the next page */ }
+  }
+
+  function dismissUi() {
+    try {
+      const ui = loadUi();
+      if (ui && ui.id === jobId) localStorage.removeItem(UI_KEY);
+    } catch (err) { /* see saveUi */ }
+  }
 
   function fmtElapsed(s) {
     const m = Math.floor(s / 60);
@@ -62,7 +87,6 @@
   }
 
   function render(job) {
-    const wasRunning = running;
     running = Boolean(job.running);
     lastJob = job;
     title.textContent = job.label + (running ? "…" : "");
@@ -80,24 +104,30 @@
     cancelBtn.hidden = !running;
     cancelBtn.disabled = Boolean(job.cancel_requested);
     closeBtn.title = running ? "Keep it running in the background" : "";
-    badge.textContent = running ? `${job.label}: ${job.step} (${job.done}/${job.total || "?"})` : "";
-    if (!running) {
-      badge.hidden = true;
-      sessionStorage.removeItem(WATCH_KEY);
-      if (wasRunning && modal.hidden) open();  // the job ran hidden: show its result
-    }
+    badge.textContent = running
+      ? `${job.label}: ${job.step} (${job.done}/${job.total || "?"})`
+      : `${job.label}: ${stateLabel(job)} (show the result)`;
   }
 
   function open() {
     modal.hidden = false;
     badge.hidden = true;
+    saveUi(false);
+  }
+
+  function minimize() {
+    modal.hidden = true;
+    badge.hidden = false;
+    saveUi(true);
   }
 
   function close() {
+    if (running) { minimize(); return; }
     modal.hidden = true;
-    badge.hidden = !running;
+    badge.hidden = true;
+    dismissUi();
     const job = lastJob;
-    if (running || !job || !job.changes_data || refreshedFor === job.id) return;
+    if (!job || !job.changes_data || refreshedFor === job.id) return;
     refreshedFor = job.id;
     if (!window.rolelensRefresh) { window.location.reload(); return; }
     window.rolelensRefresh.regions().catch((err) => {
@@ -126,7 +156,7 @@
   function attach(job, show) {
     jobId = job.id;
     render(job);
-    if (show) open(); else close();
+    if (show) open(); else minimize();
     if (job.running) timer = setTimeout(poll, POLL_MS);
   }
 
@@ -158,7 +188,6 @@
         .then((r) => r.json().then((d) => ({ status: r.status, d: d })))
         .then(({ status, d }) => {
           if (d.job) {
-            if (d.ok) sessionStorage.setItem(WATCH_KEY, d.job.id);
             attach(d.job, true);
             if (!d.ok) {  // another job of this account is running: follow that one
               renderMessages([{ category: "error", text: d.error }]);
@@ -183,15 +212,17 @@
     });
   });
 
-  // Re-attach after a reload: the account's running job, or the result of the job this
-  // tab started if it ended while the page was loading.
+  // Every page (tab switch, reload) re-attaches to the account's job as it was left: the
+  // running job (the modal, or the badge if it was minimized), or the outcome of the job
+  // this browser followed until it is dismissed. Older finished jobs are not shown.
   fetch(modal.dataset.currentUrl, { credentials: "same-origin" })
     .then((r) => (r.ok ? r.json() : { job: null }))
     .then((d) => {
       const job = d.job;
       if (!job) return;
-      if (job.running) attach(job, true);
-      else if (sessionStorage.getItem(WATCH_KEY) === job.id) attach(job, true);
+      const ui = loadUi();
+      const known = Boolean(ui && ui.id === job.id);
+      if (job.running || known) attach(job, !(known && ui.minimized));
     })
     .catch(() => {});
 })();
